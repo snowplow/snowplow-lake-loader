@@ -50,7 +50,7 @@ object Dependencies {
     val jsonSmart   = "2.5.2"
 
     // Snowplow
-    val streams    = "0.11.0"
+    val streams    = "0.12.0"
     val igluClient = "4.0.0"
 
     // Transitive overrides

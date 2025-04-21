@@ -130,7 +130,8 @@ object Processing {
     _.parEvalMapUnordered(env.cpuParallelism) { case Batched(events, entities, _, earliestCollectorTstamp) =>
       for {
         _ <- Logger[F].debug(s"Processing batch of size ${events.size}")
-        nonAtomicFields <- NonAtomicFields.resolveTypes[F](env.resolver, entities, env.schemasToSkip)
+        resolveTypesResult <- NonAtomicFields.resolveTypes[F](env.resolver, entities, env.schemasToSkip)
+        nonAtomicFields <- possiblyExitOnClashingIgluSchemas(env, resolveTypesResult)
         _ <- possiblyExitOnMissingIgluSchema(env, nonAtomicFields)
         _ <- rememberColumnNames(ref, nonAtomicFields.fields)
         (bad, rows) <- transformToSpark[F](badProcessor, events, nonAtomicFields)
@@ -285,6 +286,16 @@ object Processing {
         new RuntimeException(msg)
       )
     } else Applicative[F].unit
+
+  private def possiblyExitOnClashingIgluSchemas[F[_]: Sync](
+    env: Environment[F],
+    resolveTypesResult: Either[NonAtomicFields.ResolveTypesException, NonAtomicFields.Result]
+  ): F[NonAtomicFields.Result] =
+    resolveTypesResult match {
+      case Left(e) =>
+        Logger[F].error(e.getMessage) *> env.appHealth.beUnhealthyForRuntimeService(RuntimeService.Iglu) *> Sync[F].raiseError(e)
+      case Right(r) => Applicative[F].pure(r)
+    }
 
   private def chooseEarliestTstamp(o1: Option[Instant], o2: Option[Instant]): Option[Instant] =
     (o1, o2)

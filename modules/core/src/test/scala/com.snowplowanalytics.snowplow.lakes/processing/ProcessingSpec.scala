@@ -33,6 +33,7 @@ class ProcessingSpec extends Specification with CatsEffect {
     Load events with a known schema $e6
     Send failed events for an unrecognized schema $e7
     Crash and exit for an unrecognized schema, if exitOnMissingIgluSchema is true $e8
+    Crash and exit if events have schemas with clashing column names $e9
   """
 
   def e1 = {
@@ -329,6 +330,48 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.RemovedDataFrameFromDisk("v19700101000000")
       )
     )
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e9 = {
+
+    val contextsWithClashingSchemas = SnowplowEvent.Contexts(
+      List(
+        SelfDescribingData(
+          SchemaKey("clashing.a", "b_c", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj(
+            "col_a" -> Json.fromString("xyz")
+          )
+        ),
+        SelfDescribingData(
+          SchemaKey("clashing", "a_b_c", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj(
+            "col_a" -> Json.fromString("xyz")
+          )
+        )
+      )
+    )
+
+    val io = (for {
+      inputs <- EventUtils.inputEvents(1, EventUtils.good(contexts = contextsWithClashingSchemas))
+      tokened <- inputs.traverse(_.tokened)
+      control <- MockEnvironment.build(List(tokened))
+      environment = control.environment
+      _ <- Processing.stream(environment).compile.drain.void
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.AddedReceivedCountMetric(2),
+        Action.BecameUnhealthy(RuntimeService.Iglu),
+        Action.RemovedDataFrameFromDisk("v19700101000000")
+      )
+    )).handleError { e =>
+      e.getMessage must beEqualTo("schemas [clashing.a.b_c, clashing.a_b_c] have clashing column names")
+    }
 
     TestControl.executeEmbed(io)
   }

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://iglucentral.com/schemas/com.snowplowanalytics.self-desc/schema/jsonschema/1-0-0#",
+  "self": {
+    "vendor": "clashing.a",
+    "name": "b_c",
+    "format": "jsonschema",
+    "version": "1-0-0"
+  },
+  "type": "object",
+  "properties": {
+    "col_a": {"type": "string"}
+  },
+  "required": ["col_a"]
+}

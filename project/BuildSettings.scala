@@ -58,8 +58,8 @@ object BuildSettings {
     headerMappings := headerMappings.value + (HeaderFileType.conf -> HeaderCommentStyle.hashLineComment),
     excludeDependencies ++= Dependencies.commonExclusions,
     libraryDependencySchemes ++= Seq(
-      // kafka-clients uses version 1.5.6-4, snowflake-ingest-sdk uses version 1.5.0-1 of zstd-jni.
-      // SBT reports version conflict between these two versions however this is a Java library and
+      // kafka-clients, spark-core and parquet-hadoop use different versions of zstd-jni.
+      // SBT reports version conflict between these versions however this is a Java library and
       // doesn't follow Early Semver version scheme that is recommended for Scala libraries.
       // Therefore, version conflict reports for this library are ignored.
       "com.github.luben" % "zstd-jni" % VersionScheme.Always
