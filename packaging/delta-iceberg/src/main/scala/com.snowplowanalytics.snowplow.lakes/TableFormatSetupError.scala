@@ -10,7 +10,7 @@
 
 package com.snowplowanalytics.snowplow.lakes
 
-import org.apache.iceberg.exceptions.{ForbiddenException => IcebergForbiddenException, NotFoundException => IcebergNotFoundException}
+import org.apache.iceberg.exceptions.{ForbiddenException => IcebergForbiddenException, NoSuchIcebergTableException, NotFoundException => IcebergNotFoundException}
 
 import org.apache.spark.sql.delta.DeltaAnalysisException
 
@@ -18,6 +18,9 @@ object TableFormatSetupError {
 
   // Check if given exception is specific to iceberg format
   def check: PartialFunction[Throwable, String] = {
+      case _: NoSuchIcebergTableException =>
+        // Table exists but not in Iceberg format
+        "Target table is not an Iceberg table"
       case e: IcebergNotFoundException =>
         // Glue catalog does not exist
         e.getMessage
