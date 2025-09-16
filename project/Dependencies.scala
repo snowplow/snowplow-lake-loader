@@ -36,7 +36,7 @@ object Dependencies {
     val hudi         = "0.15.0"
     val hudiAws      = "1.0.0-beta2"
     val iceberg      = "1.9.0"
-    val hadoop       = "3.4.1"
+    val hadoop       = "3.4.2"
     val gcsConnector = "hadoop3-2.2.25"
     val hive         = "3.1.3"
 
