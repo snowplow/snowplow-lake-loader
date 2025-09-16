@@ -18,6 +18,7 @@ import sbtbuildinfo.BuildInfoPlugin.autoImport._
 import sbtbuildinfo.BuildInfoPlugin.autoImport._
 import sbtdynver.DynVerPlugin.autoImport._
 import com.typesafe.sbt.packager.docker.DockerPlugin.autoImport._
+import com.typesafe.sbt.packager.universal.UniversalPlugin.autoImport._
 import de.heikoseeberger.sbtheader.HeaderPlugin.autoImport._
 
 // Iglu plugin
@@ -27,15 +28,31 @@ import scala.sys.process._
 
 object BuildSettings {
 
+  // Java 9+ Module System flags needed for both SBT and packaged distributions
+  private lazy val javaModuleFlags = Seq(
+    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+    "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED", // Needed by Kryo serializer
+    "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED", // Needed by Kryo serializer
+    "--add-opens=java.base/java.nio=ALL-UNNAMED",
+    "--add-opens=java.base/java.util=ALL-UNNAMED", // Needed by Kryo for collections
+    "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED", // Critical for Spark StorageUtils
+    "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+    "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED" // Needed by Iceberg/Kryo for AtomicBoolean
+  )
+
   lazy val commonSettings = Seq(
     organization := "com.snowplowanalytics",
-    scalaVersion := "2.13.13",
+    scalaVersion := "2.13.16",
     scalafmtConfig := file(".scalafmt.conf"),
     scalafmtOnCompile := false,
-    scalacOptions += "-Ywarn-macros:after",
+    // Target Java 21 bytecode and restrict API to Java 21
+    scalacOptions += "-release:21",
     addCompilerPlugin(Dependencies.betterMonadicFor),
     ThisBuild / dynverVTagPrefix := false, // Otherwise git tags required to have v-prefix
     ThisBuild / dynverSeparator := "-", // to be compatible with docker
+
+    // Java Module System Compatibility
+    Compile / javaOptions ++= javaModuleFlags, // For running from SBT (sbt run)
 
     Compile / resourceGenerators += Def.task {
       val license = (Compile / resourceManaged).value / "META-INF" / "LICENSE"
@@ -77,19 +94,28 @@ object BuildSettings {
     buildInfoKeys += BuildInfoKey("cloud" -> "AWS"),
 
     // TODO: Remove this after Hadoop 3.5.0 is released with full support for V2 SDK
-    dockerEnvVars += ("AWS_JAVA_V1_DISABLE_DEPRECATION_ANNOUNCEMENT" -> "true")
+    dockerEnvVars += ("AWS_JAVA_V1_DISABLE_DEPRECATION_ANNOUNCEMENT" -> "true"),
+
+    // Set Java module flags via JAVA_OPTS environment variable
+    dockerEnvVars += ("JAVA_OPTS" -> javaModuleFlags.mkString(" "))
   )
 
   lazy val azureSettings = appSettings ++ Seq(
     name := "lake-loader-azure",
-    buildInfoKeys += BuildInfoKey("cloud" -> "Azure")
+    buildInfoKeys += BuildInfoKey("cloud" -> "Azure"),
+
+    // Set Java module flags via JAVA_OPTS environment variable
+    dockerEnvVars += ("JAVA_OPTS" -> javaModuleFlags.mkString(" "))
   )
 
   lazy val downloadUnmanagedJars = taskKey[Unit]("Downloads unmanaged Jars")
 
   lazy val gcpSettings = appSettings ++ Seq(
     name := "lake-loader-gcp",
-    buildInfoKeys += BuildInfoKey("cloud" -> "GCP")
+    buildInfoKeys += BuildInfoKey("cloud" -> "GCP"),
+
+    // Set Java module flags via JAVA_OPTS environment variable
+    dockerEnvVars += ("JAVA_OPTS" -> javaModuleFlags.mkString(" "))
   )
 
   lazy val hudiAppSettings = Seq(
