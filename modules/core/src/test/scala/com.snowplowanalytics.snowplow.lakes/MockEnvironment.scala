@@ -23,8 +23,15 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 import com.snowplowanalytics.iglu.client.Resolver
 import com.snowplowanalytics.snowplow.runtime.AppHealth
-import com.snowplowanalytics.snowplow.sources.{EventProcessingConfig, EventProcessor, SourceAndAck, TokenedEvents}
-import com.snowplowanalytics.snowplow.sinks.Sink
+import com.snowplowanalytics.snowplow.streams.{
+  EventProcessingConfig,
+  EventProcessor,
+  ListOfList,
+  Sink,
+  Sinkable,
+  SourceAndAck,
+  TokenedEvents
+}
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 
 case class MockEnvironment(state: Ref[IO, Vector[MockEnvironment.Action]], environment: Environment[IO])
@@ -140,8 +147,10 @@ object MockEnvironment {
         IO.pure(None)
     }
 
-  private def testSink(ref: Ref[IO, Vector[Action]]): Sink[IO] = Sink[IO] { batch =>
-    ref.update(_ :+ SentToBad(batch.asIterable.size))
+  private def testSink(ref: Ref[IO, Vector[Action]]): Sink[IO] = new Sink[IO] {
+    def isHealthy: IO[Boolean] = IO.pure(true)
+    def sink(batch: ListOfList[Sinkable]): IO[Unit] =
+      ref.update(_ :+ SentToBad(batch.asIterable.size))
   }
 
   private def testHttpClient: Client[IO] = Client[IO] { _ =>

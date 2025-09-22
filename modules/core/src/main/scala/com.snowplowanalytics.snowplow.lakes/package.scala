@@ -11,7 +11,7 @@
 package com.snowplowanalytics.snowplow
 
 package object lakes {
-  type AnyConfig = Config[Any, Any]
+  type AnyConfig = Config[Any, Any, Any]
 
   /**
    * Function that checks whether an exception is due to a destination setup error

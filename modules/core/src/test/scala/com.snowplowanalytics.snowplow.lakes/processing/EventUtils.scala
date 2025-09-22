@@ -13,7 +13,7 @@ package com.snowplowanalytics.snowplow.lakes.processing
 import cats.effect.IO
 
 import fs2.{Chunk, Stream}
-import com.snowplowanalytics.snowplow.sources.TokenedEvents
+import com.snowplowanalytics.snowplow.streams.TokenedEvents
 import com.snowplowanalytics.snowplow.analytics.scalasdk.Event
 import com.snowplowanalytics.snowplow.analytics.scalasdk.SnowplowEvent.{Contexts, UnstructEvent}
 

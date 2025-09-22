@@ -18,7 +18,7 @@ import fs2.Stream
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
 
-import com.snowplowanalytics.snowplow.sources.SourceAndAck
+import com.snowplowanalytics.snowplow.streams.SourceAndAck
 import com.snowplowanalytics.snowplow.runtime.{Metrics => CommonMetrics}
 
 trait Metrics[F[_]] {

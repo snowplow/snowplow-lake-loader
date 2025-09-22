@@ -31,8 +31,7 @@ import com.snowplowanalytics.iglu.client.resolver.registries.{Http4sRegistryLook
 import com.snowplowanalytics.snowplow.analytics.scalasdk.Event
 import com.snowplowanalytics.snowplow.badrows.{BadRow, Processor => BadRowProcessor}
 import com.snowplowanalytics.snowplow.badrows.Payload.{RawPayload => BadRowRawPayload}
-import com.snowplowanalytics.snowplow.sources.{EventProcessingConfig, EventProcessor, TokenedEvents}
-import com.snowplowanalytics.snowplow.sinks.ListOfList
+import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, EventProcessor, ListOfList, TokenedEvents}
 import com.snowplowanalytics.snowplow.lakes.{Environment, RuntimeService}
 import com.snowplowanalytics.snowplow.runtime.processing.BatchUp
 import com.snowplowanalytics.snowplow.runtime.syntax.foldable._

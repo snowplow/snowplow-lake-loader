@@ -17,8 +17,7 @@ import io.sentry.Sentry
 
 import com.snowplowanalytics.iglu.client.resolver.Resolver
 import com.snowplowanalytics.iglu.core.SchemaCriterion
-import com.snowplowanalytics.snowplow.sources.{EventProcessingConfig, SourceAndAck}
-import com.snowplowanalytics.snowplow.sinks.Sink
+import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, Factory, Sink, SourceAndAck}
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 import com.snowplowanalytics.snowplow.runtime.{AppHealth, AppInfo, HealthProbe, HttpClient, Webhook}
 
@@ -57,16 +56,16 @@ case class Environment[F[_]](
 
 object Environment {
 
-  def fromConfig[F[_]: Async, SourceConfig, SinkConfig](
-    config: Config.WithIglu[SourceConfig, SinkConfig],
+  def fromConfig[F[_]: Async, FactoryConfig, SourceConfig, SinkConfig](
+    config: Config.WithIglu[FactoryConfig, SourceConfig, SinkConfig],
     appInfo: AppInfo,
-    toSource: SourceConfig => F[SourceAndAck[F]],
-    toSink: SinkConfig => Resource[F, Sink[F]],
+    toFactory: FactoryConfig => Resource[F, Factory[F, SourceConfig, SinkConfig]],
     destinationSetupErrorCheck: DestinationSetupErrorCheck
   ): Resource[F, Environment[F]] =
     for {
       _ <- enableSentry[F](appInfo, config.main.monitoring.sentry)
-      sourceAndAck <- Resource.eval(toSource(config.main.input))
+      factory <- toFactory(config.main.streams)
+      sourceAndAck <- factory.source(config.main.input)
       sourceReporter = sourceAndAck.isHealthy(config.main.monitoring.healthProbe.unhealthyLatency).map(_.showIfUnhealthy)
       appHealth <- Resource.eval(AppHealth.init[F, Alert, RuntimeService](List(sourceReporter)))
       resolver <- mkResolver[F](config.iglu)
@@ -74,7 +73,9 @@ object Environment {
       _ <- HealthProbe.resource(config.main.monitoring.healthProbe.port, appHealth)
       _ <- Webhook.resource(config.main.monitoring.webhook, appInfo, httpClient, appHealth)
       badSink <-
-        toSink(config.main.output.bad.sink).onError(_ => Resource.eval(appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)))
+        factory
+          .sink(config.main.output.bad.sink)
+          .onError(_ => Resource.eval(appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)))
       windowing <- Resource.eval(EventProcessingConfig.TimedWindows.build(config.main.windowing, config.main.numEagerWindows))
       lakeWriter <- LakeWriter.build(config.main.spark, config.main.output.good)
       lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, appHealth, config.main.retries, destinationSetupErrorCheck)

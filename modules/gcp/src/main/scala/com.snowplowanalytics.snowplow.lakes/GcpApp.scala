@@ -11,18 +11,16 @@
 package com.snowplowanalytics.snowplow.lakes
 
 import cats.implicits._
+import cats.effect.IO
 
 import com.google.api.client.auth.oauth2.TokenResponseException
 import com.google.api.client.googleapis.json.GoogleJsonResponseException
 
-import com.snowplowanalytics.snowplow.sources.pubsub.{PubsubSource, PubsubSourceConfig}
-import com.snowplowanalytics.snowplow.sinks.pubsub.{PubsubSink, PubsubSinkConfig}
+import com.snowplowanalytics.snowplow.streams.pubsub.{PubsubFactory, PubsubFactoryConfig, PubsubSinkConfig, PubsubSourceConfig}
 
-object GcpApp extends LoaderApp[PubsubSourceConfig, PubsubSinkConfig](BuildInfo) {
+object GcpApp extends LoaderApp[PubsubFactoryConfig, PubsubSourceConfig, PubsubSinkConfig](BuildInfo) {
 
-  override def source: SourceProvider = PubsubSource.build(_)
-
-  override def badSink: SinkProvider = PubsubSink.resource(_)
+  override def toFactory: FactoryProvider = config => PubsubFactory.resource[IO](config)
 
   override def isDestinationSetupError: DestinationSetupErrorCheck = {
     // Bad Request - Key belongs to nonexistent service account

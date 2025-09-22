@@ -27,7 +27,7 @@ object TestConfig {
   def defaults(target: Target, tmpDir: Path): AnyConfig =
     ConfigFactory
       .load(ConfigFactory.parseString(configOverrides(target, tmpDir)))
-      .as[Config[Option[Unit], Json]] match {
+      .as[Config[Option[Unit], Json, Json]] match {
       case Right(ok) => ok
       case Left(e)   => throw new RuntimeException("Could not load default config for testing", e)
     }
@@ -72,6 +72,8 @@ object TestConfig {
     license: {
       accept: true
     }
+    streams: {}
+    input: {}
     output.bad: {
       maxRecordSize: 10000
     }

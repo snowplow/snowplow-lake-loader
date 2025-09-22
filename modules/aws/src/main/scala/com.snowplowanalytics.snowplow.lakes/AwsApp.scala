@@ -11,6 +11,7 @@
 package com.snowplowanalytics.snowplow.lakes
 
 import cats.implicits._
+import cats.effect.IO
 import org.apache.hadoop.fs.s3a.{CredentialInitializationException, UnknownStoreException}
 import software.amazon.awssdk.services.s3.model.{NoSuchBucketException, S3Exception}
 import software.amazon.awssdk.services.sts.model.StsException
@@ -23,14 +24,11 @@ import com.amazonaws.services.dynamodbv2.model.AmazonDynamoDBException
 import java.nio.file.AccessDeniedException
 import scala.util.matching.Regex
 
-import com.snowplowanalytics.snowplow.sources.kinesis.{KinesisSource, KinesisSourceConfig}
-import com.snowplowanalytics.snowplow.sinks.kinesis.{KinesisSink, KinesisSinkConfig}
+import com.snowplowanalytics.snowplow.streams.kinesis.{KinesisFactory, KinesisSinkConfig, KinesisSourceConfig}
 
-object AwsApp extends LoaderApp[KinesisSourceConfig, KinesisSinkConfig](BuildInfo) {
+object AwsApp extends LoaderApp[Unit, KinesisSourceConfig, KinesisSinkConfig](BuildInfo) {
 
-  override def source: SourceProvider = KinesisSource.build(_)
-
-  override def badSink: SinkProvider = KinesisSink.resource(_)
+  override def toFactory: FactoryProvider = _ => KinesisFactory.resource[IO]
 
   /**
    * Identifies known exceptions relating to setup of the destination
