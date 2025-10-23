@@ -19,7 +19,8 @@ object AuthenticationError {
   private val knownErrors = Map(
     90002 -> "Tenant is invalid or does not have an active subscription",
     700016 -> "Application ID was not found for this tenant",
-    7000215 -> "Invalid client secret provided"
+    7000215 -> "Invalid client secret provided",
+    7000222 -> "Client secret keys have expired"
   )
 
   def unapply(throwable: Throwable): Option[String] = throwable match {
