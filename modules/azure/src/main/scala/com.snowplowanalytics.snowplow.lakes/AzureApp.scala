@@ -15,7 +15,7 @@ import java.net.UnknownHostException
 import cats.implicits._
 import cats.effect.IO
 
-import org.apache.hadoop.fs.azurebfs.contracts.exceptions.AbfsRestOperationException
+import org.apache.hadoop.fs.azurebfs.contracts.exceptions.{AbfsRestOperationException, InvalidConfigurationValueException}
 
 import com.snowplowanalytics.snowplow.streams.kafka.{KafkaFactory, KafkaSinkConfig, KafkaSourceConfig}
 
@@ -37,6 +37,9 @@ object AzureApp extends LoaderApp[Unit, KafkaSourceConfig, KafkaSinkConfig](Buil
     // Soft delete not disabled
     case e: AbfsRestOperationException if e.getStatusCode === 409 =>
       "Blob soft delete must be disabled on the storage account"
+    // Invalid storage container path
+    case _: InvalidConfigurationValueException =>
+      "Invalid storage container path"
     case _: UnknownHostException =>
       "Wrong storage name"
     // Exceptions common to the table format - Delta/Iceberg/Hudi
