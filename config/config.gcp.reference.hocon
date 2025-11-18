@@ -30,6 +30,16 @@
     # -- Under some circumstances, this was found to slightly alleviate a problem in which pubsub might re-deliver
     # -- the same messages multiple times.
     "debounceRequests": "100 millis"
+
+    # -- Configures how transient GRPC failures are retried
+    "retries": {
+      "transientErrors": {
+        # -- Backoff delay for follow-up attempts
+        "delay": "100 millis"
+        # -- Max number of attempts, after which Enrich will crash and exit
+        "attempts": 10
+      }
+    }
   }
 
   "output": {
@@ -132,6 +142,16 @@
       "batchSize": 100
       # -- Bad events are sent to Pubsub in batches with a total size not exceeding this byte threshold
       "requestByteThreshold": 1000000
+
+      # -- Configures how transient GRPC failures are retried
+      "retries": {
+        "transientErrors": {
+          # -- Backoff delay for follow-up attempts
+          "delay": "100 millis"
+          # -- Max number of attempts, after which Enrich will crash and exit
+          "attempts": 10
+        }
+      }
     }
 
   }

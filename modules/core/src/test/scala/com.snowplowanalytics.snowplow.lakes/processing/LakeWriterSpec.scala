@@ -10,7 +10,6 @@
 
 package com.snowplowanalytics.snowplow.lakes.processing
 
-import cats.implicits._
 import cats.data.NonEmptyList
 import cats.effect.{IO, Ref}
 import cats.effect.testkit.TestControl

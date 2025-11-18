@@ -150,6 +150,9 @@
 
       # -- the maximum allowed to bytes we are allowed to send to Kinesis in 1 PutRecords request
       "byteLimit": 5242880
+
+      # -- Optional. Maximum number of retries by Kinesis Client. Default 10.
+      "maxRetries": 10
     }
 
   }

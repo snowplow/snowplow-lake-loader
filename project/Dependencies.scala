@@ -42,15 +42,15 @@ object Dependencies {
 
     // java
     val slf4j       = "2.0.13"
-    val azureSdk    = "1.15.1"
+    val azureSdk    = "1.18.0"
     val sentry      = "7.16.0"
     val awsSdk1     = "1.12.777"
-    val awsSdk2     = "2.30.17" // Match common-streams
+    val awsSdk2     = "2.34.1" // Match common-streams
     val awsRegistry = "1.1.20"
     val jsonSmart   = "2.5.2"
 
     // Snowplow
-    val streams    = "0.13.1"
+    val streams    = "0.17.0"
     val igluClient = "4.0.0"
 
     // Transitive overrides

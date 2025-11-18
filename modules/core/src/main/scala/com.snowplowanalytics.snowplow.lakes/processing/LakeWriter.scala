@@ -101,7 +101,7 @@ object LakeWriter {
         RuntimeService.SparkWriter,
         Alert.FailedToCreateEventsTable,
         destinationSetupErrorCheck
-      ) {
+      ) { _ =>
         underlying.createTable
       } <* appHealth.beHealthyForSetup
 

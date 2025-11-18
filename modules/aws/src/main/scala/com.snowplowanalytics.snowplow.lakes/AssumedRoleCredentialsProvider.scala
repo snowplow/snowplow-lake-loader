@@ -89,7 +89,7 @@ object AssumedRoleCredentialsProvider {
         ()
       }
       .build
-    stsOpt.getOrElse(DefaultCredentialsProvider.create)
+    stsOpt.getOrElse(DefaultCredentialsProvider.builder().build())
   }
 
 }
