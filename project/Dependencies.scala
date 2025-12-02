@@ -35,7 +35,7 @@ object Dependencies {
     val delta        = "3.2.1"
     val hudi         = "0.15.0"
     val hudiAws      = "1.0.0-beta2"
-    val iceberg      = "1.9.0"
+    val iceberg      = "1.9.2"
     val hadoop       = "3.4.2"
     val gcsConnector = "hadoop3-2.2.25"
     val hive         = "3.1.3"
@@ -54,14 +54,18 @@ object Dependencies {
     val igluClient = "4.0.0"
 
     // Transitive overrides
-    val protobuf  = "3.25.5"
-    val snappy    = "1.1.10.5"
-    val thrift    = "0.21.0"
-    val netty     = "4.1.118.Final"
-    val pubsubSdk = "1.134.1"
-    val avro      = "1.11.4"
-    val jackson   = "2.18.1"
-    val kafka     = "3.9.0"
+    val protobuf     = "3.25.5"
+    val snappy       = "1.1.10.5"
+    val thrift       = "0.21.0"
+    val netty        = "4.1.126.Final"
+    val pubsubSdk    = "1.134.1"
+    val avro         = "1.11.4"
+    val jackson      = "2.18.1"
+    val kafka        = "3.9.1"
+    val grpcNetty    = "1.75.0"
+    val commonsLang3 = "3.18.0"
+    val lz4          = "1.8.1"
+    val jerseyClient = "2.46"
 
     // tests
     val specs2           = "4.20.0"
@@ -118,6 +122,10 @@ object Dependencies {
   val jacksonDT    = "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310"            % V.jackson
   val jacksonMS    = "com.fasterxml.jackson.module"  %% "jackson-module-scala"               % V.jackson
   val kafkaClients = "org.apache.kafka"               % "kafka-clients"                      % V.kafka
+  val grpcNetty    = "io.grpc"                        % "grpc-netty-shaded"                  % V.grpcNetty
+  val commonsLang3 = "org.apache.commons"             % "commons-lang3"                      % V.commonsLang3
+  val lz4          = "org.lz4"                        % "lz4-java"                           % V.lz4
+  val jerseyClient = "org.glassfish.jersey.core"      % "jersey-client"                      % V.jerseyClient
 
   // snowplow
   val streamsCore      = "com.snowplowanalytics" %% "streams-core"             % V.streams
@@ -163,6 +171,9 @@ object Dependencies {
     sentry,
     circeGenericExtra,
     hadoopClient,
+    commonsLang3,
+    lz4,
+    jerseyClient,
     specs2,
     catsEffectSpecs2,
     catsEffectTestkit,
@@ -194,7 +205,8 @@ object Dependencies {
   val gcpDependencies = Seq(
     pubsub,
     pubsubSdk,
-    gcsConnector
+    gcsConnector,
+    grpcNetty
   ) ++ commonRuntimeDependencies
 
   val biglakeDependencies = Seq(
