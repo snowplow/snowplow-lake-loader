@@ -1,3 +1,13 @@
+Version 0.8.0 (2025-12-03)
+-------------------------
+Handle setup error case when Azure keys have expired (#11)
+Handle setup error case when container path is invalid (#12)
+Bump common-streams to 0.17.0 (#13)
+Bump common-streams to 0.18.0 (#15)
+Upgrade dependencies (#15)
+Add Snowman QA test integration (#14)
+Add sync workflow for snowplow-lake-loader (#10)
+
 Version 0.7.0 (2025-09-25)
 -------------------------
 Bump common-streams to 0.13.1 (#8)
