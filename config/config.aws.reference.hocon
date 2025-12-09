@@ -111,9 +111,15 @@
 #     "catalog": {
 #
 #       # -- The catalog implementation.
-#       # -- Options are `Glue` for the AWS Glue catalog, or Hadoop.
+#       # -- Options are `Glue` for the AWS Glue catalog, Rest, or Hadoop.
 #       # -- Option, default Hadoop.
 #       "type": "Glue"
+#
+#       "type": "Rest"
+#       # -- URI of the Rest catalog
+#       "uri": "http://localhost:8080"
+#       # -- Name of the catalog
+#       "catalogName": "catalog"
 #
 #       # -- Any other valid catalog config option from the Iceberg documentation
 #       "options": {

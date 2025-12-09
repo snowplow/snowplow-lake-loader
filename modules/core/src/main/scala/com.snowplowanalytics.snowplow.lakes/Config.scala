@@ -95,6 +95,13 @@ object Config {
     case class Glue(
       options: Map[String, String]
     ) extends IcebergCatalog
+
+    case class Rest(
+      uri: URI,
+      catalogName: String,
+      options: Map[String, String]
+    ) extends IcebergCatalog
+
   }
 
   case class GcpUserAgent(productName: String)
