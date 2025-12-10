@@ -96,7 +96,7 @@ object Config {
 
     case class Rest(
       uri: URI,
-      catalogName: String,
+      name: String,
       options: Map[String, String]
     ) extends IcebergCatalog
 

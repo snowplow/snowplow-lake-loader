@@ -38,8 +38,10 @@ object AwsApp extends LoaderApp[Unit, KinesisSourceConfig, KinesisSinkConfig](Bu
    * checks both the top exception and the underlying causes. Therefore in some cases we
    * over-specify the exceptions to watch out for; the top exception and causal exception both match
    */
-  override def isDestinationSetupError: DestinationSetupErrorCheck = {
+  override def isDestinationSetupError(targetType: String): DestinationSetupErrorCheck =
+    isAWSSetupError.orElse(TableFormatSetupError.check(targetType))
 
+  private def isAWSSetupError: DestinationSetupErrorCheck = {
     // Exceptions raised by underlying AWS SDK
     case _: NoSuchBucketException =>
       // S3 bucket does not exist
@@ -77,10 +79,6 @@ object AwsApp extends LoaderApp[Unit, KinesisSourceConfig, KinesisSinkConfig](Bu
       s"Missing permissions to operate on the DynamoDB table"
     case e: AmazonDynamoDBException if e.getErrorCode === "ValidationException" =>
       s"DynamoDB table does not have the expected structure"
-
-    // Exceptions common to the table format - Delta/Iceberg/Hudi
-    case TableFormatSetupError.check(t) =>
-      t
   }
 
   /**

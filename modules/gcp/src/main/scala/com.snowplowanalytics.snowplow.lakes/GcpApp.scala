@@ -22,7 +22,10 @@ object GcpApp extends LoaderApp[PubsubFactoryConfig, PubsubSourceConfig, PubsubS
 
   override def toFactory: FactoryProvider = config => PubsubFactory.resource[IO](config)
 
-  override def isDestinationSetupError: DestinationSetupErrorCheck = {
+  override def isDestinationSetupError(targetType: String): DestinationSetupErrorCheck =
+    isGCPSetupError.orElse(TableFormatSetupError.check(targetType))
+
+  private def isGCPSetupError: DestinationSetupErrorCheck = {
     // Bad Request - Key belongs to nonexistent service account
     case e: TokenResponseException if e.getStatusCode === 400 =>
       "The service account key is invalid"
@@ -32,8 +35,5 @@ object GcpApp extends LoaderApp[PubsubFactoryConfig, PubsubSourceConfig, PubsubS
     // Not Found - Destination bucket doesn't exist
     case e: GoogleJsonResponseException if Option(e.getDetails).map(_.getCode).contains(404) =>
       "The specified bucket does not exist"
-    // Exceptions common to the table format - Delta/Iceberg/Hudi
-    case TableFormatSetupError.check(t) =>
-      t
   }
 }

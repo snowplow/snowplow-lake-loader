@@ -102,7 +102,7 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
         Map(
           "catalog-impl" -> "org.apache.iceberg.rest.RESTCatalog",
           "uri" -> c.uri.toString,
-          "warehouse" -> c.catalogName
+          "warehouse" -> c.name
         ) ++ c.options
     }
 

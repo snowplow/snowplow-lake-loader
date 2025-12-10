@@ -34,7 +34,7 @@ object Run {
   def fromCli[F[_]: Async, FactoryConfig: Decoder, SourceConfig: Decoder, SinkConfig: Decoder](
     appInfo: AppInfo,
     toFactory: FactoryConfig => Resource[F, Factory[F, SourceConfig, SinkConfig]],
-    destinationSetupErrorCheck: DestinationSetupErrorCheck
+    destinationSetupErrorCheck: TargetType => DestinationSetupErrorCheck
   ): Opts[F[ExitCode]] = {
     val configPathOpt = Opts.option[Path]("config", help = "path to config file")
     val igluPathOpt   = Opts.option[Path]("iglu-config", help = "path to iglu resolver config file")
@@ -48,7 +48,7 @@ object Run {
   def fromConfigPaths[F[_]: Async, FactoryConfig: Decoder, SourceConfig: Decoder, SinkConfig: Decoder](
     appInfo: AppInfo,
     toFactory: FactoryConfig => Resource[F, Factory[F, SourceConfig, SinkConfig]],
-    destinationSetupErrorCheck: DestinationSetupErrorCheck,
+    destinationSetupErrorCheck: TargetType => DestinationSetupErrorCheck,
     pathToConfig: Path,
     pathToResolver: Path
   ): F[ExitCode] = {
@@ -74,10 +74,10 @@ object Run {
   private def fromConfig[F[_]: Async, FactoryConfig, SourceConfig, SinkConfig](
     appInfo: AppInfo,
     toFactory: FactoryConfig => Resource[F, Factory[F, SourceConfig, SinkConfig]],
-    destinationSetupErrorCheck: DestinationSetupErrorCheck,
+    destinationSetupErrorCheck: TargetType => DestinationSetupErrorCheck,
     config: Config.WithIglu[FactoryConfig, SourceConfig, SinkConfig]
   ): F[ExitCode] =
-    Environment.fromConfig(config, appInfo, toFactory, destinationSetupErrorCheck).use { env =>
+    Environment.fromConfig(config, appInfo, toFactory, destinationSetupErrorCheck(getTargetType(config.main.output.good))).use { env =>
       Processing
         .stream(env)
         .concurrently(Telemetry.stream(config.main.telemetry, env.appInfo, env.httpClient))
@@ -113,6 +113,24 @@ object Run {
       }
       Signal.handle(new Signal("TERM"), handler)
       ()
+    }
+
+  /**
+   * Temporary solution to differentiate target types in TableFormatSetupError functions. It will be
+   * removed once hudi format is removed from Lake Loader and deltaIceberg sbt package is merged to
+   * core.
+   */
+  private def getTargetType(target: Config.Target): String =
+    target match {
+      case _: Config.Delta => "delta"
+      case _: Config.Hudi  => "hudi"
+      case c: Config.Iceberg =>
+        c.catalog match {
+          case _: Config.IcebergCatalog.Hadoop  => "iceberg-hadoop"
+          case _: Config.IcebergCatalog.Glue    => "iceberg-glue"
+          case _: Config.IcebergCatalog.BigLake => "iceberg-biglake"
+          case _: Config.IcebergCatalog.Rest    => "iceberg-rest"
+        }
     }
 
 }

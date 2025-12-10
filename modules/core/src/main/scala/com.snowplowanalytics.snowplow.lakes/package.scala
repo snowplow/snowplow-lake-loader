@@ -23,4 +23,6 @@ package object lakes {
    * `getCause`. Because our application code already checks the causes.
    */
   type DestinationSetupErrorCheck = PartialFunction[Throwable, String]
+
+  type TargetType = String
 }

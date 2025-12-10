@@ -120,7 +120,7 @@
 #       # -- URI of the Rest catalog
 #       "uri": "http://localhost:8080"
 #       # -- Name of the catalog
-#       "catalogName": "catalog"
+#       "name": "catalog"
 #
 #       # -- Any other valid catalog config option from the Iceberg documentation
 #       "options": {
