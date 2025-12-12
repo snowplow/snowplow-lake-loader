@@ -70,29 +70,30 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
     s"$sparkCatalog.`${config.database}`.`${config.table}`"
 
   private def locationClause: String =
-    config.catalog match {
-      case _: Config.IcebergCatalog.Hadoop =>
+    (config.catalog, config.location) match {
+      case (_: Config.IcebergCatalog.Hadoop, _) =>
         // Hadoop catalog does not allow overriding path-based location
         ""
-      case _ =>
-        s"LOCATION '${config.location}'"
+      case (_, None) =>
+        // Some Iceberg catalogs provide the location without needing it in the config file
+        ""
+      case (_, Some(location)) =>
+        s"LOCATION '$location'"
     }
 
   private def catalogConfig: Map[String, String] =
     config.catalog match {
       case c: Config.IcebergCatalog.Hadoop =>
         Map(
-          "type" -> "hadoop",
-          "warehouse" -> config.location.toString
-        ) ++ c.options
+          "type" -> "hadoop"
+        ) ++ config.location.map(uri => "warehouse" -> uri.toString).toMap ++ c.options
       case c: Config.IcebergCatalog.BigLake =>
         Map(
           "catalog-impl" -> "org.apache.iceberg.gcp.biglake.BigLakeCatalog",
           "gcp_project" -> c.project,
           "gcp_location" -> c.region,
-          "blms_catalog" -> c.name,
-          "warehouse" -> config.location.toString
-        ) ++ c.options
+          "blms_catalog" -> c.name
+        ) ++ config.location.map(uri => "warehouse" -> uri.toString).toMap ++ c.options
       case c: Config.IcebergCatalog.Glue =>
         Map(
           "catalog-impl" -> "org.apache.iceberg.aws.glue.GlueCatalog"
@@ -111,13 +112,6 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
         s"'$k'='$v'"
       }
       .mkString(", ")
-
-  /**
-   * Iceberg tolerates async deletes; in other words when we delete a file, there is no strong
-   * requirement that the file must be deleted immediately. Iceberg uses unique file names and never
-   * re-writes a file that was previously deleted
-   */
-  override def toleratesAsyncDelete: Boolean = true
 
   /**
    * Iceberg writer requires the Dataframe to be sorted, because we set the iceberg write option

@@ -87,7 +87,8 @@
 #     # -- Tell the loader to use Iceberg
 #     "type": "Iceberg"
 #
-#     # -- URI of the bucket where the data lake will be written (required)
+#     # -- URI of the bucket where the data lake will be written
+#     # -- Required with Hadoop catalog, optional with other catalogs
 #     # -- For a GCS bucket, the uri should start with `gs://`
 #     "location": "gs://my-bucket/events
 #

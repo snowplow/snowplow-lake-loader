@@ -86,14 +86,5 @@ class HudiWriter(config: Config.Hudi) extends Writer {
         .save(config.location.toString)
     }
 
-  /**
-   * Hudi cannot tolerate async deletes. When Hudi deletes a file, the file MUST be deleted
-   * immediately.
-   *
-   * In particular, the `hoodie.properties` file gets deleted and re-created by Hudi, and those
-   * steps must happen in order.
-   */
-  override def toleratesAsyncDelete: Boolean = false
-
   override def expectsSortedDataframe: Boolean = false
 }

@@ -26,7 +26,6 @@ import com.snowplowanalytics.snowplow.lakes.tables.Writer
 import com.snowplowanalytics.snowplow.lakes.fs.LakeLoaderFileSystem
 
 import scala.jdk.CollectionConverters._
-import java.net.URI
 
 private[processing] object SparkUtils {
 
@@ -35,7 +34,7 @@ private[processing] object SparkUtils {
   def session[F[_]: Async](
     config: Config.Spark,
     writer: Writer,
-    targetLocation: URI
+    target: Config.Target
   ): Resource[F, SparkSession] = {
     val builder =
       SparkSession
@@ -51,12 +50,17 @@ private[processing] object SparkUtils {
     Resource
       .make(openLogF >> buildF)(s => closeLogF >> Sync[F].blocking(s.close()))
       .evalTap { session =>
-        if (writer.toleratesAsyncDelete) {
-          Sync[F].delay {
-            // Forces Spark to use `LakeLoaderFileSystem` when writing to the Lake via Hadoop
-            LakeLoaderFileSystem.overrideHadoopFileSystemConf(targetLocation, session.sparkContext.hadoopConfiguration)
-          }
-        } else Sync[F].unit
+        target match {
+          case delta: Config.Delta =>
+            Sync[F].delay {
+              // Forces Spark to use `LakeLoaderFileSystem` when writing to the Lake via Hadoop
+              // Delta tolerates async deletes; in other words when we delete a file, there is no strong
+              // requirement that the file must be deleted immediately. Delta uses unique file names and never
+              // re-writes a file that was previously deleted
+              LakeLoaderFileSystem.overrideHadoopFileSystemConf(delta.location, session.sparkContext.hadoopConfiguration)
+            }
+          case _ => Sync[F].unit
+        }
       }
   }
 

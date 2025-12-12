@@ -31,13 +31,6 @@ trait Writer {
   def write[F[_]: Sync](df: DataFrame): F[Unit]
 
   /**
-   * Whether this lake format tolerates deletes to happen asynchronously instead of immediately
-   *
-   * If tolerated, then we use our customized `LakeLoaderFileSystem`.
-   */
-  def toleratesAsyncDelete: Boolean
-
-  /**
    * Whether this writer expects the DataFrame to be sorted by the partition column, i.e. by
    * event_name
    */

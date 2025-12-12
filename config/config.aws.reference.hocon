@@ -97,7 +97,8 @@
 #     # -- Tell the loader to use Iceberg
 #     "type": "Iceberg"
 #
-#     # -- URI of the bucket where the data lake will be written (required)
+#     # -- URI of the bucket where the data lake will be written
+#     # -- Required with Hadoop catalog, optional with other catalogs
 #     # -- For a S3 bucket, the uri should start with `s3a://`
 #     "location": "s3a://my-bucket/events
 #

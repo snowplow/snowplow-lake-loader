@@ -80,7 +80,7 @@ object LakeWriter {
       case c: Config.Iceberg => new IcebergWriter(c)
     }
     for {
-      session <- SparkUtils.session[F](config, w, target.location)
+      session <- SparkUtils.session[F](config, w, target)
       writerParallelism = chooseWriterParallelism()
       mutex1 <- Resource.eval(Mutex[F])
       mutex2 <- Resource.eval(Mutex[F])

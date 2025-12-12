@@ -55,9 +55,7 @@ object Config {
 
   case class MaxRecordSize(maxRecordSize: Int)
 
-  sealed trait Target {
-    def location: URI
-  }
+  sealed trait Target
 
   case class Delta(
     location: URI,
@@ -74,7 +72,7 @@ object Config {
     database: String,
     table: String,
     catalog: IcebergCatalog,
-    location: URI,
+    location: Option[URI],
     icebergTableProperties: Map[String, String],
     icebergWriteOptions: Map[String, String]
   ) extends Target
