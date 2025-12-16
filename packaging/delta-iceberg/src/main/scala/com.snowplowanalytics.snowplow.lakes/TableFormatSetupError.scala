@@ -70,6 +70,8 @@ object TableFormatSetupError {
       case e: RESTException if e.getMessage.contains("Unable to process") =>
         if (e.getMessage.contains("Unable to find warehouse"))
           Some("Unable to find given catalog")
+        else if (e.getMessage.contains("Service: S3, Status Code: 301"))
+          Some("REST catalog returned an error. Check your REST catalog configuration. A possible cause is invalid S3 bucket region for this catalog")
         else
           Some("REST catalog returned an error. Check your REST catalog configuration")
       case e: RESTException if Option(e.getCause).exists(_.isInstanceOf[UnknownHostException]) =>
