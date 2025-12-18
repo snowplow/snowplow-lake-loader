@@ -108,36 +108,12 @@ object BuildSettings {
     dockerEnvVars += ("JAVA_OPTS" -> javaModuleFlags.mkString(" "))
   )
 
-  lazy val downloadUnmanagedJars = taskKey[Unit]("Downloads unmanaged Jars")
-
   lazy val gcpSettings = appSettings ++ Seq(
     name := "lake-loader-gcp",
     buildInfoKeys += BuildInfoKey("cloud" -> "GCP"),
 
     // Set Java module flags via JAVA_OPTS environment variable
     dockerEnvVars += ("JAVA_OPTS" -> javaModuleFlags.mkString(" "))
-  )
-
-  lazy val hudiAppSettings = Seq(
-    dockerAlias := dockerAlias.value.copy(tag = dockerAlias.value.tag.map(t => s"$t-hudi"))
-  )
-
-  lazy val biglakeAppSettings = Seq(
-    dockerAlias := dockerAlias.value.copy(tag = dockerAlias.value.tag.map(t => s"$t-biglake"))
-  )
-
-  lazy val biglakeSettings = Seq(
-    downloadUnmanagedJars := {
-      val libDir = unmanagedBase.value
-      IO.createDirectory(libDir)
-      val file = libDir / "biglake-catalog-iceberg1.2.0-0.1.0-with-dependencies.jar"
-      if (!file.exists) {
-        url(
-          "https://storage.googleapis.com/storage/v1/b/spark-lib/o/biglake%2Fbiglake-catalog-iceberg1.2.0-0.1.0-with-dependencies.jar?alt=media"
-        ) #> file !
-      }
-    },
-    Compile / compile := ((Compile / compile) dependsOn downloadUnmanagedJars).value
   )
 
   val igluTestSettings = Seq(

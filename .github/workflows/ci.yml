@@ -33,10 +33,6 @@ jobs:
           - azure
           - gcp
           - aws
-          - awsHudi
-          - gcpHudi
-          - azureHudi
-          - gcpBiglake
         include:
           - sbtProject: azure
             runSnyk: true
@@ -53,26 +49,6 @@ jobs:
             targetDir: "modules/aws/target"
             dockerSuffix: aws
             dockerTagSuffix: ""
-          - sbtProject: azureHudi
-            runSnyk: false
-            targetDir: "packaging/hudi/target/azure"
-            dockerSuffix: azure
-            dockerTagSuffix: "-hudi"
-          - sbtProject: gcpHudi
-            runSnyk: false
-            targetDir: "packaging/hudi/target/gcp"
-            dockerSuffix: gcp
-            dockerTagSuffix: "-hudi"
-          - sbtProject: awsHudi
-            runSnyk: false
-            targetDir: "packaging/hudi/target/aws"
-            dockerSuffix: aws
-            dockerTagSuffix: "-hudi"
-          - sbtProject: gcpBiglake
-            runSnyk: false
-            targetDir: "packaging/biglake/target/gcp"
-            dockerSuffix: gcp
-            dockerTagSuffix: "-biglake"
     steps:
       - name: Checkout Github
         uses: actions/checkout@v2

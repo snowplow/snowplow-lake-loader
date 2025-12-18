@@ -59,28 +59,6 @@
 
     }
 
-    ## -- HUDI OUTPUT FORMAT -- ##
-#   "good": {
-#
-#     # -- Tell the loader to use Hudi output format
-#     "type": "Hudi"
-#
-#     # -- URI of the bucket where the data lake will be written (required)
-#     # -- For a GCS bucket, the uri should start with `gs://`
-#     "location": "gs://my-bucket/events
-#
-#     # -- Any valid hudi configuration key/value.
-#     # -- This can be blank in most setups because the loader already sets sensible defaults.
-#     "hudiWriteOptions": {
-#       "hoodie.metadata.index.column.stats.column.list": "load_tstamp,collector_tstamp,derived_tstamp,dvce_created_tstamp"
-#     }
-#
-#     # -- Any valid hudi table property
-#     "hudiTableProperties": {
-#       "hoodie.keygen.timebased.output.dateformat": "yyyy-MM-dd"
-#     }
-#   }
-
     ## -- ICEBERG OUTPUT FORMAT -- ##
 #   "good": {
 #
@@ -102,18 +80,9 @@
 #     "catalog": {
 #
 #       # -- The catalog implementation.
-#       # -- Options are `BigLake` for the GCP BigLake/BigQuery, or Hadoop.
-#       # -- Option, default Hadoop.
-#       "type": "BigLake"
-#
-#       # -- GCP project name. Required if using the BigLake catalog type.
-#       "project": "myproject"
-#
-#       # -- GCP region. Required if using the BigLake catalog type.
-#       "region": "europe-west3"
-#
-#       # -- Catalog name. Required if using the BigLake catalog type.
-#       "name": "mycatalog"
+#       # -- Options are Hadoop and Rest
+#       $ -- Optional, default Hadoop.
+#       "type": "Hadoop"
 #
 #       # -- Any other valid catalog config option from the Iceberg documentation
 #       "options": {

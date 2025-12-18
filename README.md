@@ -8,7 +8,7 @@
 
 This project contains applications required to load Snowplow data into Open Table Formats.
 
-Lake Loader 0.8.0 supports [Delta](https://docs.delta.io/latest/index.html), [Iceberg](https://iceberg.apache.org/docs/latest/) and [Hudi](https://hudi.apache.org/docs/overview/) as output formats.
+Lake Loader 0.8.0 supports [Delta](https://docs.delta.io/latest/index.html) and [Iceberg](https://iceberg.apache.org/docs/latest/) as output formats.
 
 Check out [the example config files](./config) for how to configure your lake loader.
 

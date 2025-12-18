@@ -117,19 +117,16 @@ object Run {
 
   /**
    * Temporary solution to differentiate target types in TableFormatSetupError functions. It will be
-   * removed once hudi format is removed from Lake Loader and deltaIceberg sbt package is merged to
-   * core.
+   * removed once deltaIceberg sbt package is merged to core.
    */
   private def getTargetType(target: Config.Target): String =
     target match {
       case _: Config.Delta => "delta"
-      case _: Config.Hudi  => "hudi"
       case c: Config.Iceberg =>
         c.catalog match {
-          case _: Config.IcebergCatalog.Hadoop  => "iceberg-hadoop"
-          case _: Config.IcebergCatalog.Glue    => "iceberg-glue"
-          case _: Config.IcebergCatalog.BigLake => "iceberg-biglake"
-          case _: Config.IcebergCatalog.Rest    => "iceberg-rest"
+          case _: Config.IcebergCatalog.Hadoop => "iceberg-hadoop"
+          case _: Config.IcebergCatalog.Glue   => "iceberg-glue"
+          case _: Config.IcebergCatalog.Rest   => "iceberg-rest"
         }
     }
 

@@ -62,12 +62,6 @@ object Config {
     deltaTableProperties: Map[String, String]
   ) extends Target
 
-  case class Hudi(
-    location: URI,
-    hudiWriteOptions: Map[String, String],
-    hudiTableProperties: Map[String, String]
-  ) extends Target
-
   case class Iceberg(
     database: String,
     table: String,
@@ -82,13 +76,6 @@ object Config {
   object IcebergCatalog {
 
     case class Hadoop(options: Map[String, String]) extends IcebergCatalog
-
-    case class BigLake(
-      project: String,
-      name: String,
-      region: String,
-      options: Map[String, String]
-    ) extends IcebergCatalog
 
     case class Glue(
       options: Map[String, String]

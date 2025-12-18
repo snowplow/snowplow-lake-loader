@@ -44,28 +44,6 @@
 
     }
 
-    ## -- HUDI OUTPUT FORMAT -- ##
-#   "good": {
-#
-#     # -- Tell the loader to use Hudi output format
-#     "type": "Hudi"
-#
-#     # -- URI of the bucket where the data lake will be written (required)
-#     # -- For Azure blob storage, the uri should start with `abfs://`
-#     "location": "abfs://snowplow@example.dfs.core.windows.net/events"
-#
-#     # -- Any valid hudi configuration key/value.
-#     # -- This can be blank in most setups because the loader already sets sensible defaults.
-#     "hudiWriteOptions": {
-#       "hoodie.metadata.index.column.stats.column.list": "load_tstamp,collector_tstamp,derived_tstamp,dvce_created_tstamp"
-#     }
-#
-#     # -- Any valid hudi table property
-#     "hudiTableProperties": {
-#       "hoodie.keygen.timebased.output.dateformat": "yyyy-MM-dd"
-#     }
-#   }
-
     ## -- ICEBERG OUTPUT FORMAT -- ##
 #   "good": {
 #

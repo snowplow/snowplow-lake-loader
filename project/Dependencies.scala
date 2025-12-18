@@ -17,11 +17,6 @@ object Dependencies {
       // A version of Spark which is compatible with the current version of Iceberg and Delta
       val forIcebergDelta      = "3.5.4"
       val forIcebergDeltaMinor = "3.5"
-
-      // Hudi can use a different version of Spark because we bundle a separate Docker image
-      // This version of Spark must be compatible with the current version of Hudi
-      val forHudi      = "3.5.4"
-      val forHudiMinor = "3.5"
     }
 
     // Scala
@@ -33,8 +28,6 @@ object Dependencies {
 
     // Spark
     val delta        = "3.2.1"
-    val hudi         = "0.15.0"
-    val hudiAws      = "1.0.0-beta2"
     val iceberg      = "1.9.2"
     val hadoop       = "3.4.2"
     val gcsConnector = "hadoop3-2.2.25"
@@ -80,23 +73,17 @@ object Dependencies {
   object Spark {
     val coreForIcebergDelta = "org.apache.spark" %% "spark-core" % V.Spark.forIcebergDelta
     val sqlForIcebergDelta  = "org.apache.spark" %% "spark-sql"  % V.Spark.forIcebergDelta
-    val coreForHudi         = "org.apache.spark" %% "spark-core" % V.Spark.forHudi
-    val sqlForHudi          = "org.apache.spark" %% "spark-sql"  % V.Spark.forHudi
-    val hiveForHudi         = "org.apache.spark" %% "spark-hive" % V.Spark.forHudi
   }
 
   // spark and hadoop
   val delta         = "io.delta"                   %% "delta-spark"                                            % V.delta
   val deltaDynamodb = "io.delta"                    % "delta-storage-s3-dynamodb"                              % V.delta
-  val hudi          = "org.apache.hudi"            %% s"hudi-spark${V.Spark.forHudiMinor}-bundle"              % V.hudi
   val iceberg       = "org.apache.iceberg"         %% s"iceberg-spark-runtime-${V.Spark.forIcebergDeltaMinor}" % V.iceberg
   val hadoopClient  = "org.apache.hadoop"           % "hadoop-client-runtime"                                  % V.hadoop
   val hadoopAzure   = "org.apache.hadoop"           % "hadoop-azure"                                           % V.hadoop
   val hadoopAws     = "org.apache.hadoop"           % "hadoop-aws"                                             % V.hadoop
   val gcsConnector  = "com.google.cloud.bigdataoss" % "gcs-connector"                                          % V.gcsConnector
   val hiveCommon    = "org.apache.hive"             % "hive-common"                                            % V.hive
-
-  val hudiAws = ("org.apache.hudi" % "hudi-aws" % V.hudiAws).excludeAll(ExclusionRule(organization = "org.apache.hudi"))
 
   // java
   val slf4j         = "org.slf4j"              % "slf4j-simple"          % V.slf4j
@@ -208,24 +195,6 @@ object Dependencies {
     gcsConnector,
     grpcNetty
   ) ++ commonRuntimeDependencies
-
-  val biglakeDependencies = Seq(
-    hiveCommon % Runtime,
-    hadoopYarn % Runtime,
-    thrift     % Runtime
-  )
-
-  val hudiDependencies = Seq(
-    hudi,
-    Spark.coreForHudi % Runtime,
-    Spark.sqlForHudi  % Runtime,
-    Spark.hiveForHudi % Runtime
-  )
-
-  val hudiAwsDependencies = Seq(
-    hudiAws     % Runtime,
-    awsRegistry % Runtime
-  )
 
   val commonExclusions = Seq(
     ExclusionRule(organization = "org.apache.zookeeper", name     = "zookeeper"),

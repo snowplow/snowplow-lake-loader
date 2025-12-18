@@ -13,7 +13,7 @@ package com.snowplowanalytics.snowplow.lakes.tables
 import cats.effect.Sync
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
-/** The methods needed for a writing specific table format (e.g. delta, iceberg or hudi) */
+/** The methods needed for a writing specific table format (e.g. delta or iceberg) */
 trait Writer {
 
   /** Spark config parameters which the Lake Loader needs for this specific table format */

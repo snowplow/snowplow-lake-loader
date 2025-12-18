@@ -87,13 +87,6 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
         Map(
           "type" -> "hadoop"
         ) ++ config.location.map(uri => "warehouse" -> uri.toString).toMap ++ c.options
-      case c: Config.IcebergCatalog.BigLake =>
-        Map(
-          "catalog-impl" -> "org.apache.iceberg.gcp.biglake.BigLakeCatalog",
-          "gcp_project" -> c.project,
-          "gcp_location" -> c.region,
-          "blms_catalog" -> c.name
-        ) ++ config.location.map(uri => "warehouse" -> uri.toString).toMap ++ c.options
       case c: Config.IcebergCatalog.Glue =>
         Map(
           "catalog-impl" -> "org.apache.iceberg.aws.glue.GlueCatalog"

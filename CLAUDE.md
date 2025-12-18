@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Snowplow Lake Loader is a Scala application that loads Snowplow enriched events into open table formats (Delta, Iceberg, Hudi) on cloud storage. It supports Azure (Event Hubs → ADLS Gen2), GCP (Pubsub → GCS), and AWS (Kinesis → S3) platforms.
+Snowplow Lake Loader is a Scala application that loads Snowplow enriched events into open table formats (Delta, Iceberg) on cloud storage. It supports Azure (Event Hubs → ADLS Gen2), GCP (Pubsub → GCS), and AWS (Kinesis → S3) platforms.
 
 ## Common Commands
 
@@ -34,8 +34,8 @@ sbt "project core" test
 # Build Docker image for AWS
 sbt "project aws" docker:publishLocal
 
-# Build Docker image for Azure with Hudi
-sbt "project azureHudi" docker:publishLocal
+# Build Docker image for Azure
+sbt "project azure" docker:publishLocal
 
 # Stage Docker build
 sbt "project gcp" docker:stage
@@ -47,10 +47,6 @@ sbt "project gcp" docker:stage
 sbt "project aws" <command>
 sbt "project azure" <command>
 sbt "project gcp" <command>
-
-# Work with table format modules
-sbt "project awsHudi" <command>
-sbt "project gcpBiglake" <command>
 ```
 
 ## Architecture
@@ -58,12 +54,12 @@ sbt "project gcpBiglake" <command>
 ### Multi-Module Structure
 - **Core Module** (`modules/core/`): Shared processing logic, Spark operations, table writers
 - **Cloud Modules** (`modules/{aws,azure,gcp}/`): Cloud-specific entry points and authentication
-- **Packaging Modules** (`packaging/{hudi,biglake,delta-iceberg}/`): Alternative table format dependencies
+- **Packaging Modules** (`packaging/delta-iceberg/`): Alternative table format dependencies
 
 ### Key Components
 - **LoaderApp**: Main application entry point with cloud-specific implementations
 - **Processing**: Core data processing pipeline using Apache Spark
-- **Table Writers**: Format-specific writers (Delta, Iceberg, Hudi) in `modules/core/src/main/scala/com.snowplowanalytics.snowplow.lakes/tables/`
+- **Table Writers**: Format-specific writers (Delta, Iceberg) in `modules/core/src/main/scala/com.snowplowanalytics.snowplow.lakes/tables/`
 - **LakeWriter**: Orchestrates the writing process with windowing and batching
 
 ### Configuration System
@@ -94,12 +90,10 @@ sbt "project gcpBiglake" <command>
 - Multi-project SBT build with complex dependencies between packaging variants
 - Docker images built for multiple architectures (linux/amd64, linux/arm64/v8)
 - Uses BuildInfo plugin to inject version and build metadata
-- Biglake connector requires external JAR download during build
 
 ### Table Format Support
 - **Delta**: Default format with configurable table properties
 - **Iceberg**: Supports schema evolution and metadata optimization
-- **Hudi**: Complex configuration for partitioning, clustering, and timeline management
 - Format selection affects dependencies and runtime behavior
 
 ### Monitoring and Operations

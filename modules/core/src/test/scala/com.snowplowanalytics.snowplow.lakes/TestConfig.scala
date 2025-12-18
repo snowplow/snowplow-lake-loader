@@ -20,7 +20,6 @@ object TestConfig {
 
   sealed trait Target
   case object Delta extends Target
-  case object Hudi extends Target
   case object Iceberg extends Target
 
   /** Provides an app Config using defaults provided by our standard reference.conf */
@@ -40,14 +39,6 @@ object TestConfig {
         $commonRequiredConfig
         output.good: {
           type: "Delta"
-          location: "$location"
-        }
-        """
-      case Hudi =>
-        s"""
-        $commonRequiredConfig
-        output.good: {
-          type: "Hudi"
           location: "$location"
         }
         """

@@ -19,7 +19,7 @@ import org.apache.spark.sql.types.StructType
 
 import com.snowplowanalytics.snowplow.runtime.{AppHealth, Retrying}
 import com.snowplowanalytics.snowplow.lakes.{Alert, Config, DestinationSetupErrorCheck, RuntimeService}
-import com.snowplowanalytics.snowplow.lakes.tables.{DeltaWriter, HudiWriter, IcebergWriter, Writer}
+import com.snowplowanalytics.snowplow.lakes.tables.{DeltaWriter, IcebergWriter, Writer}
 
 trait LakeWriter[F[_]] {
 
@@ -76,7 +76,6 @@ object LakeWriter {
   ): Resource[F, LakeWriter[F]] = {
     val w = target match {
       case c: Config.Delta   => new DeltaWriter(c)
-      case c: Config.Hudi    => new HudiWriter(c)
       case c: Config.Iceberg => new IcebergWriter(c)
     }
     for {
