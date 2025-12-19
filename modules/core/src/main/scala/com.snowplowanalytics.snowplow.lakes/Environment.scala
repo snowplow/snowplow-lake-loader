@@ -78,7 +78,8 @@ object Environment {
           .onError(_ => Resource.eval(appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)))
       windowing <- Resource.eval(EventProcessingConfig.TimedWindows.build(config.main.windowing, config.main.numEagerWindows))
       lakeWriter <- LakeWriter.build(config.main.spark, config.main.output.good)
-      lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, appHealth, config.main.retries, destinationSetupErrorCheck)
+      destinationAndTableFormatSetupErrorCheck = destinationSetupErrorCheck.orElse(TableFormatSetupError.check(config.main.output.good))
+      lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, appHealth, config.main.retries, destinationAndTableFormatSetupErrorCheck)
       metrics <- Resource.eval(Metrics.build(config.main.monitoring.metrics, sourceAndAck))
       cpuParallelism = chooseCpuParallelism(config.main)
     } yield Environment(

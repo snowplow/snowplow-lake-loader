@@ -52,9 +52,8 @@ sbt "project gcp" <command>
 ## Architecture
 
 ### Multi-Module Structure
-- **Core Module** (`modules/core/`): Shared processing logic, Spark operations, table writers
+- **Core Module** (`modules/core/`): Shared processing logic, Spark operations, table writers, table format dependencies
 - **Cloud Modules** (`modules/{aws,azure,gcp}/`): Cloud-specific entry points and authentication
-- **Packaging Modules** (`packaging/delta-iceberg/`): Alternative table format dependencies
 
 ### Key Components
 - **LoaderApp**: Main application entry point with cloud-specific implementations

@@ -24,10 +24,7 @@ object AzureApp extends LoaderApp[Unit, KafkaSourceConfig, KafkaSinkConfig](Buil
   override def toFactory: FactoryProvider =
     _ => KafkaFactory.resource[IO]
 
-  override def isDestinationSetupError(targetType: String): DestinationSetupErrorCheck =
-    isAzureSetupError.orElse(TableFormatSetupError.check(targetType))
-
-  private def isAzureSetupError: DestinationSetupErrorCheck = {
+  override def isDestinationSetupError: DestinationSetupErrorCheck = {
     // Authentication issue (wrong OAuth endpoint, wrong client id, wrong secret)
     case AuthenticationError(e) =>
       e

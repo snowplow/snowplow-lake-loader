@@ -26,29 +26,22 @@ lazy val core: Project = project
 lazy val azure: Project = project
   .in(file("modules/azure"))
   .settings(BuildSettings.azureSettings)
-  .settings(libraryDependencies ++= Dependencies.azureDependencies ++ Dependencies.icebergDeltaRuntimeDependencies)
-  .dependsOn(core, deltaIceberg)
+  .settings(libraryDependencies ++= Dependencies.azureDependencies)
+  .dependsOn(core)
   .enablePlugins(BuildInfoPlugin, JavaAppPackaging, SnowplowDockerPlugin)
 
 lazy val gcp: Project = project
   .in(file("modules/gcp"))
   .settings(BuildSettings.gcpSettings)
-  .settings(libraryDependencies ++= Dependencies.gcpDependencies ++ Dependencies.icebergDeltaRuntimeDependencies)
-  .dependsOn(core, deltaIceberg)
+  .settings(libraryDependencies ++= Dependencies.gcpDependencies)
+  .dependsOn(core)
   .enablePlugins(BuildInfoPlugin, JavaAppPackaging, SnowplowDockerPlugin)
 
 lazy val aws: Project = project
   .in(file("modules/aws"))
   .settings(BuildSettings.awsSettings)
-  .settings(libraryDependencies ++= Dependencies.awsDependencies ++ Dependencies.icebergDeltaRuntimeDependencies)
-  .dependsOn(core, deltaIceberg)
+  .settings(libraryDependencies ++= Dependencies.awsDependencies)
+  .dependsOn(core)
   .enablePlugins(BuildInfoPlugin, JavaAppPackaging, SnowplowDockerPlugin)
-
-/** Packaging: Extra runtime dependencies for alternative assets */
-
-lazy val deltaIceberg: Project = project
-  .in(file("packaging/delta-iceberg"))
-  .settings(BuildSettings.commonSettings)
-  .settings(libraryDependencies ++= Dependencies.icebergDeltaRuntimeDependencies)
 
 ThisBuild / fork := true

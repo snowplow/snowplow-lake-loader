@@ -10,7 +10,15 @@
 
 package com.snowplowanalytics.snowplow.lakes
 
-import org.apache.iceberg.exceptions.{ForbiddenException => IcebergForbiddenException, NoSuchIcebergTableException, NotFoundException => IcebergNotFoundException, RESTException, NoSuchNamespaceException, BadRequestException, NotAuthorizedException}
+import org.apache.iceberg.exceptions.{
+  BadRequestException,
+  ForbiddenException => IcebergForbiddenException,
+  NoSuchIcebergTableException,
+  NoSuchNamespaceException,
+  NotAuthorizedException,
+  NotFoundException => IcebergNotFoundException,
+  RESTException
+}
 
 import org.apache.iceberg.rest.auth.OAuth2Properties
 
@@ -21,11 +29,15 @@ import java.net.UnknownHostException
 object TableFormatSetupError {
 
   // Check if given exception is specific to iceberg format
-  def check(targetType: String): PartialFunction[Throwable, String] =
-    targetType match {
-      case "delta" => Delta.check.unlift
-      case "iceberg-glue" => IcebergGlue.check.unlift
-      case "iceberg-rest" => IcebergRest.check.unlift
+  def check(target: Config.Target): PartialFunction[Throwable, String] =
+    target match {
+      case _: Config.Delta => Delta.check.unlift
+      case c: Config.Iceberg =>
+        c.catalog match {
+          case _: Config.IcebergCatalog.Glue   => IcebergGlue.check.unlift
+          case _: Config.IcebergCatalog.Rest   => IcebergRest.check.unlift
+          case _: Config.IcebergCatalog.Hadoop => PartialFunction.empty
+        }
       case _ => PartialFunction.empty
     }
 
@@ -46,8 +58,8 @@ object TableFormatSetupError {
         // Glue catalog does not exist
         Some(e.getMessage)
       case e: IcebergForbiddenException =>
-          // No permission to create a table in Glue catalog
-          Some(e.getMessage)
+        // No permission to create a table in Glue catalog
+        Some(e.getMessage)
       case _ => None
     }
   }
@@ -71,7 +83,9 @@ object TableFormatSetupError {
         if (e.getMessage.contains("Unable to find warehouse"))
           Some("Unable to find given catalog")
         else if (e.getMessage.contains("Service: S3, Status Code: 301"))
-          Some("REST catalog returned an error. Check your REST catalog configuration. A possible cause is invalid S3 bucket region for this catalog")
+          Some(
+            "REST catalog returned an error. Check your REST catalog configuration. A possible cause is invalid S3 bucket region for this catalog"
+          )
         else
           Some("REST catalog returned an error. Check your REST catalog configuration")
       case e: RESTException if Option(e.getCause).exists(_.isInstanceOf[UnknownHostException]) =>
@@ -98,13 +112,13 @@ object TableFormatSetupError {
         OAuth2Properties.UNSUPPORTED_GRANT_TYPE_ERROR,
         OAuth2Properties.INVALID_SCOPE_ERROR
       )
-      val badRequestPattern = """.*Malformed request: (\w+): .*""".r
+      val badRequestPattern    = """.*Malformed request: (\w+): .*""".r
       val notAuthorizedPattern = """.*Not authorized: (\w+): .*""".r
 
       val errorType = exception.getMessage match {
-        case badRequestPattern(errorType) => Some(errorType)
+        case badRequestPattern(errorType)    => Some(errorType)
         case notAuthorizedPattern(errorType) => Some(errorType)
-        case _ => None
+        case _                               => None
       }
       errorType.filter(errorTypes.contains(_))
     }

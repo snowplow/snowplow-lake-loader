@@ -38,10 +38,7 @@ object AwsApp extends LoaderApp[Unit, KinesisSourceConfig, KinesisSinkConfig](Bu
    * checks both the top exception and the underlying causes. Therefore in some cases we
    * over-specify the exceptions to watch out for; the top exception and causal exception both match
    */
-  override def isDestinationSetupError(targetType: String): DestinationSetupErrorCheck =
-    isAWSSetupError.orElse(TableFormatSetupError.check(targetType))
-
-  private def isAWSSetupError: DestinationSetupErrorCheck = {
+  override def isDestinationSetupError: DestinationSetupErrorCheck = {
     // Exceptions raised by underlying AWS SDK
     case _: NoSuchBucketException =>
       // S3 bucket does not exist

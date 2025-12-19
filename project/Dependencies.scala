@@ -136,21 +136,14 @@ object Dependencies {
     avro     % Runtime
   )
 
-  val icebergDeltaRuntimeDependencies = Seq(
-    iceberg,
-    delta,
-    Spark.coreForIcebergDelta,
-    Spark.sqlForIcebergDelta
-  )
-
   val coreDependencies = Seq(
     streamsCore,
     loaders,
     runtime,
-    delta                     % Provided,
-    Spark.coreForIcebergDelta % Provided,
-    Spark.sqlForIcebergDelta  % Provided,
-    iceberg                   % Provided,
+    delta,
+    Spark.coreForIcebergDelta,
+    Spark.sqlForIcebergDelta,
+    iceberg,
     jacksonDT,
     jacksonMS,
     igluClientHttp4s,
