@@ -197,15 +197,23 @@ class LakeWriterSpec extends Specification with CatsEffect {
     }
 
   def e7 = {
-    val mocks = Mocks(List(Response.Success, Response.ExceptionThrown(new RuntimeException("boom!"))))
+    val numAttempts = retriesConfig.transientErrors.attempts
+    val mocks = Mocks(
+      List(Response.Success) ++ List.fill(numAttempts)(Response.ExceptionThrown(new RuntimeException("boom!")))
+    )
 
     control(mocks).flatMap { c =>
+      val commitAttempts = (1 to numAttempts).flatMap { _ =>
+        Vector(
+          Action.CommitAttempted("testview2"),
+          Action.BecameUnhealthy(RuntimeService.SparkWriter)
+        )
+      }
+
       val expected = Vector(
         Action.CommitAttempted("testview1"),
-        Action.BecameHealthy(RuntimeService.SparkWriter),
-        Action.CommitAttempted("testview2"),
-        Action.BecameUnhealthy(RuntimeService.SparkWriter)
-      )
+        Action.BecameHealthy(RuntimeService.SparkWriter)
+      ) ++ commitAttempts
 
       val wrappedLakeWriter = LakeWriter.withHandledErrors(
         c.lakeWriter,

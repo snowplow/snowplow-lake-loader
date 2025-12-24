@@ -118,11 +118,16 @@ object LakeWriter {
       underlying.removeDataFrameFromDisk(viewName)
 
     def commit(viewName: String): F[Unit] =
-      underlying
-        .commit(viewName)
-        .onError { case _ =>
-          appHealth.beUnhealthyForRuntimeService(RuntimeService.SparkWriter)
-        } <* appHealth.beHealthyForRuntimeService(RuntimeService.SparkWriter)
+      Retrying.withRetries(
+        appHealth,
+        retries.transientErrors,
+        retries.setupErrors,
+        RuntimeService.SparkWriter,
+        Alert.FailedToCommitToLake,
+        destinationSetupErrorCheck
+      ) { _ =>
+        underlying.commit(viewName)
+      }
   }
 
   /**

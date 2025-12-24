@@ -19,8 +19,12 @@ sealed trait Alert
 object Alert {
 
   final case class FailedToCreateEventsTable(causes: SetupExceptionMessages) extends Alert
+  final case class FailedToCommitToLake(causes: SetupExceptionMessages) extends Alert
 
-  implicit def showAlert: Show[Alert] = Show[Alert] { case FailedToCreateEventsTable(causes) =>
-    show"Failed to create events table: $causes"
+  implicit def showAlert: Show[Alert] = Show[Alert] {
+    case FailedToCreateEventsTable(causes) =>
+      show"Failed to create events table: $causes"
+    case FailedToCommitToLake(causes) =>
+      show"Failed to commit to lake: $causes"
   }
 }
