@@ -97,6 +97,13 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
         Map(
           "catalog-impl" -> "org.apache.iceberg.aws.glue.GlueCatalog"
         ) ++ c.options
+      case c: Config.IcebergCatalog.Rest =>
+        Map(
+          "catalog-impl" -> "org.apache.iceberg.rest.RESTCatalog",
+          "uri" -> c.uri,
+          "credential" -> c.credential,
+          "warehouse" -> config.location.toString
+        ) ++ c.options
     }
 
   private def tableProps: String =

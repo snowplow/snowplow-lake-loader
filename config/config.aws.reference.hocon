@@ -100,6 +100,7 @@
 #     # -- URI of the bucket where the data lake will be written (required)
 #     # -- For a S3 bucket, the uri should start with `s3a://`
 #     "location": "s3a://my-bucket/events
+#     # -- or set to the warehouse name if using a Rest catalog
 #
 #     # -- Name of the database in the catalog (required)
 #     "database": "snowplow"
@@ -111,9 +112,13 @@
 #     "catalog": {
 #
 #       # -- The catalog implementation.
-#       # -- Options are `Glue` for the AWS Glue catalog, or Hadoop.
+#       # -- Options are `Glue` for the AWS Glue catalog, Rest, or Hadoop.
 #       # -- Option, default Hadoop.
 #       "type": "Glue"
+#
+#       "type": "Rest"
+#         "uri": "http://localhost:8080"
+#         "credentials": "" # -- This can be blank if not required
 #
 #       # -- Any other valid catalog config option from the Iceberg documentation
 #       "options": {
@@ -121,6 +126,8 @@
 #          "glue.id": "123456789"
 #       }
 #     }
+     }
+
 #
 #     # -- Any valid Iceberg table property
 #     # -- This can be blank in most setups because the loader already sets sensible defaults.
