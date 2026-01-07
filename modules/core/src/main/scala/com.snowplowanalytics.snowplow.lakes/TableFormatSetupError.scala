@@ -67,7 +67,7 @@ object TableFormatSetupError {
   object IcebergRest {
     def check: Throwable => Option[String] = {
       case e: IcebergForbiddenException =>
-        if (checkS3RestCatalogPermissionError(e))
+        if (checkS3RestCatalogPermissionError(e) || checkFileReadPermissionError(e))
           Some("IAM role of the REST catalog is missing permissions")
         else if (checkRestCatalogRolePermissionError(e))
           Some("REST catalog role is missing permissions")
@@ -91,6 +91,11 @@ object TableFormatSetupError {
       case e: RESTException if Option(e.getCause).exists(_.isInstanceOf[UnknownHostException]) =>
         Some("REST catalog URI isn't reachable")
       case _ => None
+    }
+
+    private def checkFileReadPermissionError(exception: IcebergForbiddenException): Boolean = {
+      val badRequestPattern = """.*Forbidden: Failed to read file.*""".r
+      badRequestPattern.matches(exception.getMessage)
     }
 
     private def checkS3RestCatalogPermissionError(exception: IcebergForbiddenException): Boolean = {

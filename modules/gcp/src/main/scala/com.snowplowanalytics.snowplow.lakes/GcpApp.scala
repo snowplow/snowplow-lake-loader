@@ -15,6 +15,7 @@ import cats.effect.IO
 
 import com.google.api.client.auth.oauth2.TokenResponseException
 import com.google.api.client.googleapis.json.GoogleJsonResponseException
+import com.google.cloud.storage.StorageException
 
 import com.snowplowanalytics.snowplow.streams.pubsub.{PubsubFactory, PubsubFactoryConfig, PubsubSinkConfig, PubsubSourceConfig}
 
@@ -32,5 +33,8 @@ object GcpApp extends LoaderApp[PubsubFactoryConfig, PubsubSourceConfig, PubsubS
     // Not Found - Destination bucket doesn't exist
     case e: GoogleJsonResponseException if Option(e.getDetails).map(_.getCode).contains(404) =>
       "The specified bucket does not exist"
+    // Forbidden - Permissions missing for Cloud Storage
+    case e: StorageException if Option(e.getCode).contains(403) =>
+      "IAM role is missing permissions"
   }
 }
