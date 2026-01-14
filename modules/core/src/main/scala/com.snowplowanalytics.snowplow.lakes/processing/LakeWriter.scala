@@ -10,6 +10,8 @@
 
 package com.snowplowanalytics.snowplow.lakes.processing
 
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 import cats.implicits._
 import cats.data.NonEmptyList
 import cats.effect.{Async, Resource, Sync}
@@ -64,9 +66,17 @@ trait LakeWriter[F[_]] {
 
   /** Commit the DataFrame by writing it into the lake */
   def commit(viewName: String): F[Unit]
+
+  /** Get the total number of active data files in the table */
+  def getTableDataFilesTotal: F[Option[Long]]
+
+  /** Get the total number of table snapshots/versions currently retained in the transaction log */
+  def getTableSnapshotsRetained: F[Option[Long]]
 }
 
 object LakeWriter {
+
+  private implicit def logger[F[_]: Sync]: Logger[F] = Slf4jLogger.getLogger[F]
 
   trait WithHandledErrors[F[_]] extends LakeWriter[F]
 
@@ -128,6 +138,16 @@ object LakeWriter {
       ) { _ =>
         underlying.commit(viewName)
       }
+
+    def getTableDataFilesTotal: F[Option[Long]] =
+      underlying.getTableDataFilesTotal.handleErrorWith { e =>
+        Logger[F].warn(e)("Failed to get table_data_files_total metric").as(None)
+      }
+
+    def getTableSnapshotsRetained: F[Option[Long]] =
+      underlying.getTableSnapshotsRetained.handleErrorWith { e =>
+        Logger[F].warn(e)("Failed to get table_snapshots_retained metric").as(None)
+      }
   }
 
   /**
@@ -174,6 +194,12 @@ object LakeWriter {
                  w.write(df)
                }
       } yield ()
+
+    def getTableDataFilesTotal: F[Option[Long]] =
+      w.getTableDataFilesTotal(spark)
+
+    def getTableSnapshotsRetained: F[Option[Long]] =
+      w.getTableSnapshotsRetained(spark)
   }
 
   /**

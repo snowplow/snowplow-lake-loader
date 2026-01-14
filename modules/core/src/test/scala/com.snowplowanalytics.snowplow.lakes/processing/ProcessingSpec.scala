@@ -55,6 +55,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000000")
       )
@@ -115,6 +117,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window1.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000000"),
 
@@ -128,6 +132,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration),
         Action.SetE2ELatencyMetric(2 * MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window2.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000052"),
 
@@ -140,6 +146,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration),
         Action.SetE2ELatencyMetric(3 * MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window3.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000134")
       )
@@ -171,6 +179,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000000")
       )
@@ -214,6 +224,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(8),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed((bads1 ::: goods1 ::: bads2 ::: goods2).map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000000")
       )
@@ -252,6 +264,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000000")
       )
@@ -292,6 +306,8 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedCommittedCountMetric(1),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
         Action.RemovedDataFrameFromDisk("v19700101000000")
       )

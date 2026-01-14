@@ -335,6 +335,10 @@ object LakeWriterSpec {
                         }
                     }
         } yield result
+
+      def getTableDataFilesTotal: IO[Option[Long]] = IO(Some(123L))
+
+      def getTableSnapshotsRetained: IO[Option[Long]] = IO(Some(456L))
     }
 
 }

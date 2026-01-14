@@ -15,6 +15,7 @@ import cats.effect.Sync
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.iceberg.spark.Spark3Util
 
 import com.snowplowanalytics.snowplow.lakes.Config
 import com.snowplowanalytics.snowplow.lakes.processing.SparkSchema
@@ -105,6 +106,18 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
         s"'$k'='$v'"
       }
       .mkString(", ")
+
+  def getTableDataFilesTotal[F[_]: Sync](spark: SparkSession): F[Option[Long]] =
+    for {
+      icebergTable <- Sync[F].blocking(Spark3Util.loadIcebergTable(spark, fqTable))
+      snapshot <- Sync[F].delay(icebergTable.currentSnapshot())
+      total <- Sync[F].delay(snapshot.summary().get("total-data-files").toLong)
+    } yield Some(total)
+
+  def getTableSnapshotsRetained[F[_]: Sync](spark: SparkSession): F[Option[Long]] = {
+    val snapshotsTable = s"${fqTable}.snapshots"
+    Sync[F].blocking(Some(spark.table(snapshotsTable).count()))
+  }
 
   /**
    * Iceberg writer requires the Dataframe to be sorted, because we set the iceberg write option

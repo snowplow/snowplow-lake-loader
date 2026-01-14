@@ -62,6 +62,8 @@ object MockEnvironment {
     case class SetLatencyMetric(latency: FiniteDuration) extends Action
     case class SetProcessingLatencyMetric(latency: FiniteDuration) extends Action
     case class SetE2ELatencyMetric(latency: FiniteDuration) extends Action
+    case class SetTableDataFilesTotal(count: Long) extends Action
+    case class SetTableSnaphotsRetained(count: Long) extends Action
 
     /* Health */
     case class BecameUnhealthy(service: RuntimeService) extends Action
@@ -122,6 +124,10 @@ object MockEnvironment {
 
     def commit(viewName: String): IO[Unit] =
       state.update(_ :+ CommittedToTheLake(viewName))
+
+    def getTableDataFilesTotal: IO[Option[Long]] = IO(Some(123L))
+
+    def getTableSnapshotsRetained: IO[Option[Long]] = IO(Some(456L))
   }
 
   private def testSourceAndAck(windows: List[List[TokenedEvents]], state: Ref[IO, Vector[Action]]): SourceAndAck[IO] =
@@ -175,6 +181,12 @@ object MockEnvironment {
 
     def setE2ELatency(latency: FiniteDuration): IO[Unit] =
       ref.update(_ :+ SetE2ELatencyMetric(latency))
+
+    def setTableDataFilesTotal(count: Long): IO[Unit] =
+      ref.update(_ :+ SetTableDataFilesTotal(count))
+
+    def setTableSnapshotsRetained(count: Long): IO[Unit] =
+      ref.update(_ :+ SetTableSnaphotsRetained(count))
 
     def report: Stream[IO, Nothing] = Stream.never[IO]
   }

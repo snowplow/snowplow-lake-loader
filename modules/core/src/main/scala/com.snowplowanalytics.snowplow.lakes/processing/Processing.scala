@@ -269,6 +269,10 @@ object Processing {
                  case None =>
                    Sync[F].unit
                }
+          tableDataFilesTotal <- env.lakeWriter.getTableDataFilesTotal
+          _ <- tableDataFilesTotal.fold(Sync[F].unit)(env.metrics.setTableDataFilesTotal)
+          tableSnapshotsRetained <- env.lakeWriter.getTableSnapshotsRetained
+          _ <- tableSnapshotsRetained.fold(Sync[F].unit)(env.metrics.setTableSnapshotsRetained)
         } yield ()
       } else
         Logger[F].info(s"Window ${state.viewName} yielded zero good events.  Nothing will be written into the lake.")

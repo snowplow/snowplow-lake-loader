@@ -27,7 +27,7 @@ object Dependencies {
     val betterMonadicFor = "0.3.1"
 
     // Spark
-    val delta        = "3.2.1"
+    val delta        = "3.3.2"
     val iceberg      = "1.9.2"
     val hadoop       = "3.4.2"
     val gcsConnector = "hadoop3-2.2.25"

@@ -30,6 +30,12 @@ trait Writer {
   /** Write Snowplow events into the table */
   def write[F[_]: Sync](df: DataFrame): F[Unit]
 
+  /** Get the total number of active data files in the table */
+  def getTableDataFilesTotal[F[_]: Sync](spark: SparkSession): F[Option[Long]]
+
+  /** Get the total number of table snapshots/versions currently retained in the transaction log */
+  def getTableSnapshotsRetained[F[_]: Sync](spark: SparkSession): F[Option[Long]]
+
   /**
    * Whether this writer expects the DataFrame to be sorted by the partition column, i.e. by
    * event_name

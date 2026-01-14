@@ -28,6 +28,8 @@ trait Metrics[F[_]] {
   def setLatency(latency: FiniteDuration): F[Unit]
   def setProcessingLatency(latency: FiniteDuration): F[Unit]
   def setE2ELatency(latency: FiniteDuration): F[Unit]
+  def setTableDataFilesTotal(count: Long): F[Unit]
+  def setTableSnapshotsRetained(count: Long): F[Unit]
 
   def report: Stream[F, Nothing]
 }
@@ -43,7 +45,9 @@ object Metrics {
     committed: Int,
     latency: FiniteDuration,
     processingLatency: Option[FiniteDuration],
-    e2eLatency: Option[FiniteDuration]
+    e2eLatency: Option[FiniteDuration],
+    tableDataFilesTotal: Option[Long],
+    tableSnapshotsRetained: Option[Long]
   ) extends CommonMetrics.State {
     def toKVMetrics: List[CommonMetrics.KVMetric] =
       List(
@@ -51,13 +55,14 @@ object Metrics {
         KVMetric.CountBad(bad),
         KVMetric.CountCommitted(committed),
         KVMetric.Latency(latency)
-      ) ++ processingLatency.map(KVMetric.ProcessingLatency(_)) ++ e2eLatency.map(KVMetric.E2ELatency(_))
+      ) ++ processingLatency.map(KVMetric.ProcessingLatency(_)) ++ e2eLatency.map(KVMetric.E2ELatency(_)) ++
+        tableDataFilesTotal.map(KVMetric.TableDataFilesTotal(_)) ++ tableSnapshotsRetained.map(KVMetric.TableSnaphotsRetained(_))
   }
 
   private object State {
     def initialize[F[_]: Functor](sourceAndAck: SourceAndAck[F]): F[State] =
       sourceAndAck.currentStreamLatency.map { latency =>
-        State(0, 0, 0, latency.getOrElse(Duration.Zero), None, None)
+        State(0, 0, 0, latency.getOrElse(Duration.Zero), None, None, None, None)
       }
   }
 
@@ -84,6 +89,16 @@ object Metrics {
         ref.update { state =>
           val newLatency = state.e2eLatency.fold(latency)(_.max(latency))
           state.copy(e2eLatency = Some(newLatency))
+        }
+      def setTableDataFilesTotal(count: Long): F[Unit] =
+        ref.update { state =>
+          val newCount = state.tableDataFilesTotal.fold(count)(_.max(count))
+          state.copy(tableDataFilesTotal = Some(newCount))
+        }
+      def setTableSnapshotsRetained(count: Long): F[Unit] =
+        ref.update { state =>
+          val newCount = state.tableSnapshotsRetained.fold(count)(_.max(count))
+          state.copy(tableSnapshotsRetained = Some(newCount))
         }
     }
 
@@ -125,5 +140,16 @@ object Metrics {
       val metricType = CommonMetrics.MetricType.Gauge
     }
 
+    final case class TableDataFilesTotal(v: Long) extends CommonMetrics.KVMetric {
+      val key        = "table_data_files_total"
+      val value      = v.toString
+      val metricType = CommonMetrics.MetricType.Gauge
+    }
+
+    final case class TableSnaphotsRetained(v: Long) extends CommonMetrics.KVMetric {
+      val key        = "table_snapshots_retained"
+      val value      = v.toString
+      val metricType = CommonMetrics.MetricType.Gauge
+    }
   }
 }

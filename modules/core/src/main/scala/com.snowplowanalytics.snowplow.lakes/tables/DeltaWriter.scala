@@ -17,7 +17,9 @@ import cats.effect.Sync
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.delta.{DeltaAnalysisException, DeltaConcurrentModificationException}
+import org.apache.spark.sql.delta.{DeltaAnalysisException, DeltaConcurrentModificationException, DeltaLog}
+import org.apache.spark.sql.delta.util.FileNames
+import org.apache.spark.sql.delta.util.FileNames.DeltaFile
 import io.delta.tables.DeltaTable
 
 import com.snowplowanalytics.snowplow.lakes.Config
@@ -103,6 +105,32 @@ class DeltaWriter(config: Config.Delta) extends Writer {
             .as(None)
         }
     }
+
+  override def getTableDataFilesTotal[F[_]: Sync](spark: SparkSession): F[Option[Long]] =
+    for {
+      deltaLog <- Sync[F].blocking(DeltaLog.forTable(spark, config.location.toString))
+      snapshot = deltaLog.unsafeVolatileSnapshot
+      total <- Sync[F].delay(snapshot.checksumOpt.map(_.numFiles))
+    } yield total
+
+  override def getTableSnapshotsRetained[F[_]: Sync](spark: SparkSession): F[Option[Long]] =
+    for {
+      deltaLog <- Sync[F].blocking(DeltaLog.forTable(spark, config.location.toString))
+      snapshot       = deltaLog.unsafeVolatileSnapshot
+      currentVersion = snapshot.version
+      // This does a directory listing (IO) but doesn't read file contents
+      earliestVersionOpt <- Sync[F].blocking {
+                              deltaLog.store
+                                .listFrom(
+                                  path       = FileNames.listingPrefix(deltaLog.logPath, 0),
+                                  hadoopConf = deltaLog.newDeltaHadoopConf()
+                                )
+                                .collectFirst { case DeltaFile(_, version) => version }
+                            }
+      count = earliestVersionOpt.map { earliestVersion =>
+                currentVersion - earliestVersion + 1
+              }
+    } yield count
 
   override def expectsSortedDataframe: Boolean = false
 }
