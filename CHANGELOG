@@ -1,3 +1,18 @@
+Version 0.9.0 (2026-01-15)
+-------------------------
+Add table_data_files_total and table_snapshots_retained metrics (#25)
+Upgrade dependencies (#27)
+Handle setup error cases for Iceberg REST catalog with GCP (#28)
+Retry errors on commit (#26)
+Move the content of deltaIceberg module to core module (#24)
+Remove hudi and biglake variants (#24)
+Increase default `commit.retry.num-retries` for Iceberg tables (#23)
+Handle setup error for S3 bucket being in the different region that hosts REST catalog (#22)
+Handle various setup error cases with Iceberg REST catalog (#18)
+Make 'location' optional for Iceberg catalogs (#21)
+Update sync workflow for snowplow-lake-loader (#19)
+Add Iceberg Rest catalog support (#17)
+
 Version 0.8.0 (2025-12-03)
 -------------------------
 Handle setup error case when Azure keys have expired (#11)
