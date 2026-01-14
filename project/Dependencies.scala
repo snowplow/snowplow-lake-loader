@@ -43,22 +43,23 @@ object Dependencies {
     val jsonSmart   = "2.5.2"
 
     // Snowplow
-    val streams    = "0.18.0"
+    val streams    = "0.19.0"
     val igluClient = "4.0.0"
 
     // Transitive overrides
     val protobuf     = "3.25.5"
     val snappy       = "1.1.10.5"
     val thrift       = "0.21.0"
-    val netty        = "4.1.126.Final"
+    val netty        = "4.1.130.Final"
     val pubsubSdk    = "1.134.1"
     val avro         = "1.11.4"
     val jackson      = "2.18.1"
     val kafka        = "3.9.1"
     val grpcNetty    = "1.75.0"
     val commonsLang3 = "3.18.0"
-    val lz4          = "1.8.1"
+    val lz4          = "1.10.1"
     val jerseyClient = "2.46"
+    val log4jCore    = "2.25.3"
 
     // tests
     val specs2           = "4.20.0"
@@ -111,8 +112,9 @@ object Dependencies {
   val kafkaClients = "org.apache.kafka"               % "kafka-clients"                      % V.kafka
   val grpcNetty    = "io.grpc"                        % "grpc-netty-shaded"                  % V.grpcNetty
   val commonsLang3 = "org.apache.commons"             % "commons-lang3"                      % V.commonsLang3
-  val lz4          = "org.lz4"                        % "lz4-java"                           % V.lz4
+  val lz4          = "at.yawk.lz4"                    % "lz4-java"                           % V.lz4
   val jerseyClient = "org.glassfish.jersey.core"      % "jersey-client"                      % V.jerseyClient
+  val log4jCore    = "org.apache.logging.log4j"       % "log4j-core"                         % V.log4jCore
 
   // snowplow
   val streamsCore      = "com.snowplowanalytics" %% "streams-core"             % V.streams
@@ -154,6 +156,7 @@ object Dependencies {
     commonsLang3,
     lz4,
     jerseyClient,
+    log4jCore,
     specs2,
     catsEffectSpecs2,
     catsEffectTestkit,
@@ -195,13 +198,13 @@ object Dependencies {
     ExclusionRule(organization = "org.eclipse.jetty", name        = "jetty-server"),
     ExclusionRule(organization = "org.eclipse.jetty", name        = "jetty-http"),
     ExclusionRule(organization = "org.eclipse.jetty", name        = "jetty-webapp"),
-    ExclusionRule(organization = "org.eclipse.jetty", name        = "jetty-webapp"),
     ExclusionRule(organization = "org.apache.kerby"),
     ExclusionRule(organization = "org.apache.hadoop", name        = "hadoop-yarn-server-applicationhistoryservice"),
     ExclusionRule(organization = "org.apache.hadoop", name        = "hadoop-yarn-server-common"),
     ExclusionRule(organization = "org.apache.ivy", name           = "ivy"),
     ExclusionRule(organization = "com.github.joshelser", name     = "dropwizard-metrics-hadoop-metrics2-reporter"),
-    ExclusionRule(organization = "org.apache.logging.log4j", name = "log4j-slf4j2-impl")
+    ExclusionRule(organization = "org.apache.logging.log4j", name = "log4j-slf4j2-impl"),
+    ExclusionRule(organization = "org.lz4", name                  = "lz4-java") // replaced by at.yawk.lz4:lz4-java
   )
 
 }
