@@ -47,18 +47,18 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 4),
-        Action.CommittedToTheLake("v19700101000000"),
+        Action.AppendedRowsToDataFrame("v0000000001", 4),
+        Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -75,7 +75,7 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AddedBadCountMetric(2),
         Action.SentToBad(2),
@@ -86,7 +86,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedBadCountMetric(2),
         Action.SentToBad(2),
         Action.Checkpointed(tokened.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -110,46 +110,46 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.CreatedTable,
 
         /* window 1 */
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 2),
-        Action.CommittedToTheLake("v19700101000000"),
+        Action.AppendedRowsToDataFrame("v0000000001", 2),
+        Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window1.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000"),
+        Action.RemovedDataFrameFromDisk("v0000000001"),
 
         /* window 2 */
-        Action.InitializedLocalDataFrame("v19700101000052"),
+        Action.InitializedLocalDataFrame("v0000000002"),
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000052", 6),
-        Action.CommittedToTheLake("v19700101000052"),
+        Action.AppendedRowsToDataFrame("v0000000002", 6),
+        Action.CommittedToTheLake("v0000000002"),
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration),
         Action.SetE2ELatencyMetric(2 * MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window2.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000052"),
+        Action.RemovedDataFrameFromDisk("v0000000002"),
 
         /* window 3 */
-        Action.InitializedLocalDataFrame("v19700101000134"),
+        Action.InitializedLocalDataFrame("v0000000003"),
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000134", 4),
-        Action.CommittedToTheLake("v19700101000134"),
+        Action.AppendedRowsToDataFrame("v0000000003", 4),
+        Action.CommittedToTheLake("v0000000003"),
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration),
         Action.SetE2ELatencyMetric(3 * MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window3.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000134")
+        Action.RemovedDataFrameFromDisk("v0000000003")
       )
     )
 
@@ -168,21 +168,21 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 2),
+        Action.AppendedRowsToDataFrame("v0000000001", 2),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 2),
+        Action.AppendedRowsToDataFrame("v0000000001", 2),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 2),
-        Action.CommittedToTheLake("v19700101000000"),
+        Action.AppendedRowsToDataFrame("v0000000001", 2),
+        Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -202,7 +202,7 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AddedBadCountMetric(2),
         Action.SentToBad(2),
@@ -219,15 +219,15 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedBadCountMetric(2),
         Action.SentToBad(2),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 8),
-        Action.CommittedToTheLake("v19700101000000"),
+        Action.AppendedRowsToDataFrame("v0000000001", 8),
+        Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(8),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed((bads1 ::: goods1 ::: bads2 ::: goods2).map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -257,17 +257,17 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
-        Action.AppendedRowsToDataFrame("v19700101000000", 2),
-        Action.CommittedToTheLake("v19700101000000"),
+        Action.AppendedRowsToDataFrame("v0000000001", 2),
+        Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -297,19 +297,19 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AddedBadCountMetric(1),
         Action.SentToBad(1),
-        Action.AppendedRowsToDataFrame("v19700101000000", 1),
-        Action.CommittedToTheLake("v19700101000000"),
+        Action.AppendedRowsToDataFrame("v0000000001", 1),
+        Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(1),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -340,10 +340,10 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.BecameUnhealthy(RuntimeService.Iglu),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
 
@@ -380,10 +380,10 @@ class ProcessingSpec extends Specification with CatsEffect {
       Vector(
         Action.SubscribedToStream,
         Action.CreatedTable,
-        Action.InitializedLocalDataFrame("v19700101000000"),
+        Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.BecameUnhealthy(RuntimeService.Iglu),
-        Action.RemovedDataFrameFromDisk("v19700101000000")
+        Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )).handleError { e =>
       e.getMessage must beEqualTo("schemas [clashing.a.b_c, clashing.a_b_c] have clashing column names")

@@ -58,9 +58,11 @@ object Processing {
       implicit val lookup: RegistryLookup[F] = Http4sRegistryLookup(env.httpClient)
       val eventProcessingConfig              = EventProcessingConfig(env.windowing, env.metrics.setLatency)
 
-      env.source
-        .stream(eventProcessingConfig, eventProcessor(env, deferredTableExists.get))
-        .concurrently(runInBackground)
+      Stream.eval(WindowState.factory[F]).flatMap { windowStateFactory =>
+        env.source
+          .stream(eventProcessingConfig, eventProcessor(env, deferredTableExists.get, windowStateFactory))
+          .concurrently(runInBackground)
+      }
 
     }
 
@@ -82,10 +84,11 @@ object Processing {
 
   private def eventProcessor[F[_]: Async: RegistryLookup](
     env: Environment[F],
-    deferredTableExists: F[Unit]
+    deferredTableExists: F[Unit],
+    windowStateFactory: WindowState.Factory[F]
   ): EventProcessor[F] = { in =>
     val resources = for {
-      windowState <- Stream.eval(WindowState.build[F])
+      windowState <- Stream.eval(windowStateFactory.build)
       _ <- Stream.eval(deferredTableExists)
       stateRef <- Stream.eval(Ref[F].of(windowState))
       _ <- manageDataFrame(env, windowState.viewName)

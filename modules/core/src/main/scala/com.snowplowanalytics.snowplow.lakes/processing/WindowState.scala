@@ -10,12 +10,11 @@
 
 package com.snowplowanalytics.snowplow.lakes.processing
 
-import cats.effect.kernel.Unique
+import cats.effect.kernel.{Ref, Unique}
 import cats.effect.Sync
 import cats.implicits._
 
-import java.time.format.DateTimeFormatter
-import java.time.{Instant, ZoneOffset}
+import java.time.Instant
 
 /**
  * Local in-memory state which is accumulated as a window gets processed
@@ -34,29 +33,34 @@ import java.time.{Instant, ZoneOffset}
  *   The number of events in this window
  * @param earliestCollectorTstamp
  *   The earliest collector_tstamp of all events seen in the window
+ * @param id
+ *   An id for this window, which is unique within the internals of a running loader. It increments
+ *   from one.
  */
 private[processing] case class WindowState(
   tokens: List[Unique.Token],
   startTime: Instant,
   nonAtomicColumnNames: Set[String],
   numEvents: Int,
-  earliestCollectorTstamp: Option[Instant]
+  earliestCollectorTstamp: Option[Instant],
+  id: Int
 ) {
 
   /** The name by which the current DataFrame is known to the Spark catalog */
   val viewName: String =
-    WindowState.formatter.format(startTime)
-
+    f"v$id%010d"
 }
 
 private[processing] object WindowState {
-  private val formatter: DateTimeFormatter =
-    DateTimeFormatter
-      .ofPattern("'v'yyyyMMddHHmmss")
-      .withZone(ZoneOffset.UTC)
 
-  def build[F[_]: Sync]: F[WindowState] =
-    Sync[F].realTimeInstant.map { now =>
-      WindowState(Nil, now, Set.empty, 0, None)
-    }
+  class Factory[F[_]: Sync] private[WindowState] (counter: Ref[F, Int]) {
+    def build: F[WindowState] =
+      for {
+        now <- Sync[F].realTimeInstant
+        i <- counter.updateAndGet(_ + 1)
+      } yield WindowState(Nil, now, Set.empty, 0, None, i)
+  }
+
+  def factory[F[_]: Sync]: F[Factory[F]] =
+    Ref[F].of(0).map(new Factory(_))
 }
