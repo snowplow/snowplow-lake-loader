@@ -1,0 +1,21 @@
+{
+  "$schema": "http://iglucentral.com/schemas/com.snowplowanalytics.self-desc/schema/jsonschema/1-0-0#",
+  "self": {
+    "vendor": "myvendor",
+    "name": "nestedschema",
+    "format": "jsonschema",
+    "version": "1-0-1"
+  },
+  "type": "object",
+  "properties": {
+    "inner": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"}
+      },
+      "required": ["id"]
+    },
+    "tag": {"type": "string"}
+  },
+  "required": ["inner"]
+}

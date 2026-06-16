@@ -11,15 +11,15 @@
 package com.snowplowanalytics.snowplow.lakes
 
 import cats.implicits._
-import cats.effect.{Async, Resource, Sync}
+import cats.effect.{Async, Resource}
 import org.http4s.client.Client
-import io.sentry.Sentry
 
 import com.snowplowanalytics.iglu.client.resolver.Resolver
 import com.snowplowanalytics.iglu.core.SchemaCriterion
 import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, Factory, Sink, SourceAndAck}
+import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
-import com.snowplowanalytics.snowplow.runtime.{AppHealth, AppInfo, HealthProbe, HttpClient, Webhook}
+import com.snowplowanalytics.snowplow.runtime.{AppHealth, AppInfo, HealthProbe, HttpClient, Sentry, Webhook}
 
 /**
  * Resources and runtime-derived configuration needed for processing events
@@ -51,7 +51,8 @@ case class Environment[F[_]](
   badRowMaxSize: Int,
   schemasToSkip: List[SchemaCriterion],
   respectIgluNullability: Boolean,
-  exitOnMissingIgluSchema: Boolean
+  exitOnMissingIgluSchema: Boolean,
+  decompression: DecompressionConfig
 )
 
 object Environment {
@@ -63,25 +64,25 @@ object Environment {
     destinationSetupErrorCheck: DestinationSetupErrorCheck
   ): Resource[F, Environment[F]] =
     for {
-      _ <- enableSentry[F](appInfo, config.main.monitoring.sentry)
+      _ <- Sentry.enable[F](appInfo, config.main.monitoring.sentry)
       factory <- toFactory(config.main.streams)
       sourceAndAck <- factory.source(config.main.input)
       sourceReporter = sourceAndAck.isHealthy(config.main.monitoring.healthProbe.unhealthyLatency).map(_.showIfUnhealthy)
       appHealth <- Resource.eval(AppHealth.init[F, Alert, RuntimeService](List(sourceReporter)))
       resolver <- mkResolver[F](config.iglu)
       httpClient <- HttpClient.resource[F](config.main.http.client)
-      _ <- HealthProbe.resource(config.main.monitoring.healthProbe.port, appHealth)
+      metrics <- Metrics.build(config.main.monitoring.metrics, sourceAndAck)
+      _ <- HealthProbe.resource(config.main.monitoring.healthProbe.port, appHealth, metrics.scrape)
       _ <- Webhook.resource(config.main.monitoring.webhook, appInfo, httpClient, appHealth)
       badSink <-
         factory
           .sink(config.main.output.bad.sink)
           .onError(_ => Resource.eval(appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)))
       windowing <- Resource.eval(EventProcessingConfig.TimedWindows.build(config.main.windowing, config.main.numEagerWindows))
-      lakeWriter <- LakeWriter.build(config.main.spark, config.main.output.good)
+      lakeWriter <- LakeWriter.build(config.main.spark, config.main.output.good, config.main.respectIgluNullability)
       destinationAndTableFormatSetupErrorCheck = destinationSetupErrorCheck.orElse(TableFormatSetupError.check(config.main.output.good))
       lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, appHealth, config.main.retries, destinationAndTableFormatSetupErrorCheck)
-      metrics <- Resource.eval(Metrics.build(config.main.monitoring.metrics, sourceAndAck))
-      cpuParallelism = chooseCpuParallelism(config.main)
+      cpuParallelism    = chooseCpuParallelism(config.main)
     } yield Environment(
       appInfo                 = appInfo,
       source                  = sourceAndAck,
@@ -97,29 +98,9 @@ object Environment {
       badRowMaxSize           = config.main.output.bad.maxRecordSize,
       schemasToSkip           = config.main.skipSchemas,
       respectIgluNullability  = config.main.respectIgluNullability,
-      exitOnMissingIgluSchema = config.main.exitOnMissingIgluSchema
+      exitOnMissingIgluSchema = config.main.exitOnMissingIgluSchema,
+      decompression           = config.main.decompression
     )
-
-  private def enableSentry[F[_]: Sync](appInfo: AppInfo, config: Option[Config.Sentry]): Resource[F, Unit] =
-    config match {
-      case Some(c) =>
-        val acquire = Sync[F].delay {
-          Sentry.init { options =>
-            options.setDsn(c.dsn)
-            options.setRelease(appInfo.version)
-            c.tags.foreach { case (k, v) =>
-              options.setTag(k, v)
-            }
-          }
-        }
-
-        Resource.makeCase(acquire) {
-          case (_, Resource.ExitCase.Errored(e)) => Sync[F].delay(Sentry.captureException(e)).void
-          case _                                 => Sync[F].unit
-        }
-      case None =>
-        Resource.unit[F]
-    }
 
   private def mkResolver[F[_]: Async](resolverConfig: Resolver.ResolverConfig): Resource[F, Resolver[F]] =
     Resource.eval {

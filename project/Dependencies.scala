@@ -15,7 +15,7 @@ object Dependencies {
     object Spark {
 
       // A version of Spark which is compatible with the current version of Iceberg and Delta
-      val forIcebergDelta      = "3.5.4"
+      val forIcebergDelta      = "3.5.8"
       val forIcebergDeltaMinor = "3.5"
     }
 
@@ -28,38 +28,35 @@ object Dependencies {
 
     // Spark
     val delta        = "3.3.2"
-    val iceberg      = "1.9.2"
-    val hadoop       = "3.4.2"
+    val iceberg      = "1.10.1"
+    val hadoop       = "3.4.3"
     val gcsConnector = "hadoop3-2.2.25"
     val hive         = "3.1.3"
 
     // java
     val slf4j       = "2.0.13"
     val azureSdk    = "1.18.0"
-    val sentry      = "7.16.0"
     val awsSdk1     = "1.12.777"
-    val awsSdk2     = "2.34.1" // Match common-streams
+    val awsSdk2     = "2.42.23" // Match common-streams
     val awsRegistry = "1.1.20"
     val jsonSmart   = "2.5.2"
 
     // Snowplow
-    val streams    = "0.19.0"
+    val streams    = "0.24.1"
     val igluClient = "4.0.0"
 
     // Transitive overrides
-    val protobuf     = "3.25.5"
-    val snappy       = "1.1.10.5"
-    val thrift       = "0.21.0"
-    val netty        = "4.1.130.Final"
-    val pubsubSdk    = "1.134.1"
-    val avro         = "1.11.4"
-    val jackson      = "2.18.1"
-    val kafka        = "3.9.1"
-    val grpcNetty    = "1.75.0"
-    val commonsLang3 = "3.18.0"
-    val lz4          = "1.10.1"
-    val jerseyClient = "2.46"
-    val log4jCore    = "2.25.3"
+    val protobuf      = "3.25.5"
+    val snappy        = "1.1.10.5"
+    val netty         = "4.1.133.Final"
+    val pubsubSdk     = "1.134.1"
+    val jackson       = "2.18.1"
+    val kafka         = "3.9.2"
+    val grpcNetty     = "1.75.0"
+    val commonsLang3  = "3.18.0"
+    val lz4           = "1.10.1"
+    val log4jCore     = "2.25.3"
+    val aircompressor = "2.0.3"
 
     // tests
     val specs2           = "4.20.0"
@@ -89,32 +86,30 @@ object Dependencies {
   // java
   val slf4j         = "org.slf4j"              % "slf4j-simple"          % V.slf4j
   val azureIdentity = "com.azure"              % "azure-identity"        % V.azureSdk
-  val sentry        = "io.sentry"              % "sentry"                % V.sentry
   val awsGlue       = "software.amazon.awssdk" % "glue"                  % V.awsSdk2
   val awsS3         = "software.amazon.awssdk" % "s3"                    % V.awsSdk2
   val awsS3Transfer = "software.amazon.awssdk" % "s3-transfer-manager"   % V.awsSdk2
   val awsSts        = "software.amazon.awssdk" % "sts"                   % V.awsSdk2
+  val awsKms        = "software.amazon.awssdk" % "kms"                   % V.awsSdk2
   val dynamodbSdk1  = "com.amazonaws"          % "aws-java-sdk-dynamodb" % V.awsSdk1
   val awsRegistry   = "software.amazon.glue"   % "schema-registry-serde" % V.awsRegistry
   val jsonSmart     = "net.minidev"            % "json-smart"            % V.jsonSmart
 
   // transitive overrides
-  val protobuf     = "com.google.protobuf"            % "protobuf-java"                      % V.protobuf
-  val snappy       = "org.xerial.snappy"              % "snappy-java"                        % V.snappy
-  val hadoopYarn   = "org.apache.hadoop"              % "hadoop-yarn-server-resourcemanager" % V.hadoop
-  val thrift       = "org.apache.thrift"              % "libthrift"                          % V.thrift
-  val netty        = "io.netty"                       % "netty-all"                          % V.netty
-  val awsCore      = "com.amazonaws"                  % "aws-java-sdk-core"                  % V.awsSdk1
-  val pubsubSdk    = "com.google.cloud"               % "google-cloud-pubsub"                % V.pubsubSdk
-  val avro         = "org.apache.avro"                % "avro"                               % V.avro
-  val jacksonDT    = "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310"            % V.jackson
-  val jacksonMS    = "com.fasterxml.jackson.module"  %% "jackson-module-scala"               % V.jackson
-  val kafkaClients = "org.apache.kafka"               % "kafka-clients"                      % V.kafka
-  val grpcNetty    = "io.grpc"                        % "grpc-netty-shaded"                  % V.grpcNetty
-  val commonsLang3 = "org.apache.commons"             % "commons-lang3"                      % V.commonsLang3
-  val lz4          = "at.yawk.lz4"                    % "lz4-java"                           % V.lz4
-  val jerseyClient = "org.glassfish.jersey.core"      % "jersey-client"                      % V.jerseyClient
-  val log4jCore    = "org.apache.logging.log4j"       % "log4j-core"                         % V.log4jCore
+  val protobuf      = "com.google.protobuf"            % "protobuf-java"                      % V.protobuf
+  val snappy        = "org.xerial.snappy"              % "snappy-java"                        % V.snappy
+  val hadoopYarn    = "org.apache.hadoop"              % "hadoop-yarn-server-resourcemanager" % V.hadoop
+  val netty         = "io.netty"                       % "netty-all"                          % V.netty
+  val awsCore       = "com.amazonaws"                  % "aws-java-sdk-core"                  % V.awsSdk1
+  val pubsubSdk     = "com.google.cloud"               % "google-cloud-pubsub"                % V.pubsubSdk
+  val jacksonDT     = "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310"            % V.jackson
+  val jacksonMS     = "com.fasterxml.jackson.module"  %% "jackson-module-scala"               % V.jackson
+  val kafkaClients  = "org.apache.kafka"               % "kafka-clients"                      % V.kafka
+  val grpcNetty     = "io.grpc"                        % "grpc-netty-shaded"                  % V.grpcNetty
+  val commonsLang3  = "org.apache.commons"             % "commons-lang3"                      % V.commonsLang3
+  val lz4           = "at.yawk.lz4"                    % "lz4-java"                           % V.lz4
+  val log4jCore     = "org.apache.logging.log4j"       % "log4j-core"                         % V.log4jCore
+  val aircompressor = "io.airlift"                     % "aircompressor"                      % V.aircompressor
 
   // snowplow
   val streamsCore      = "com.snowplowanalytics" %% "streams-core"             % V.streams
@@ -131,11 +126,11 @@ object Dependencies {
   val catsEffectSpecs2  = "org.typelevel" %% "cats-effect-testing-specs2" % V.catsEffectSpecs2 % Test
 
   val commonRuntimeDependencies = Seq(
-    slf4j    % Runtime,
-    protobuf % Runtime,
-    netty    % Runtime,
-    snappy   % Runtime,
-    avro     % Runtime
+    slf4j         % Runtime,
+    protobuf      % Runtime,
+    netty         % Runtime,
+    snappy        % Runtime,
+    aircompressor % Runtime
   )
 
   val coreDependencies = Seq(
@@ -150,12 +145,10 @@ object Dependencies {
     jacksonMS,
     igluClientHttp4s,
     decline,
-    sentry,
     circeGenericExtra,
     hadoopClient,
     commonsLang3,
     lz4,
-    jerseyClient,
     log4jCore,
     specs2,
     catsEffectSpecs2,
@@ -171,6 +164,7 @@ object Dependencies {
     awsGlue,
     awsSts,
     dynamodbSdk1,
+    awsKms        % Runtime,
     deltaDynamodb % Runtime,
     awsS3Transfer % Runtime
   ) ++ commonRuntimeDependencies

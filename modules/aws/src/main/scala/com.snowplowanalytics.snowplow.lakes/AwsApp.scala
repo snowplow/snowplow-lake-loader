@@ -24,9 +24,9 @@ import com.amazonaws.services.dynamodbv2.model.AmazonDynamoDBException
 import java.nio.file.AccessDeniedException
 import scala.util.matching.Regex
 
-import com.snowplowanalytics.snowplow.streams.kinesis.{KinesisFactory, KinesisSinkConfig, KinesisSourceConfig}
+import com.snowplowanalytics.snowplow.streams.kinesis.{KinesisFactory, KinesisHttpSourceConfig, KinesisSinkConfig}
 
-object AwsApp extends LoaderApp[Unit, KinesisSourceConfig, KinesisSinkConfig](BuildInfo) {
+object AwsApp extends LoaderApp[Unit, KinesisHttpSourceConfig, KinesisSinkConfig](BuildInfo) {
 
   override def toFactory: FactoryProvider = _ => KinesisFactory.resource[IO]
 

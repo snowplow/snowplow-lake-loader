@@ -32,6 +32,7 @@ import com.snowplowanalytics.snowplow.streams.{
   SourceAndAck,
   TokenedEvents
 }
+import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 
 case class MockEnvironment(state: Ref[IO, Vector[MockEnvironment.Action]], environment: Environment[IO])
@@ -56,9 +57,9 @@ object MockEnvironment {
     case class CommittedToTheLake(viewName: String) extends Action
 
     /* Metrics */
-    case class AddedReceivedCountMetric(count: Int) extends Action
-    case class AddedBadCountMetric(count: Int) extends Action
-    case class AddedCommittedCountMetric(count: Int) extends Action
+    case class AddedReceivedCountMetric(count: Long) extends Action
+    case class AddedBadCountMetric(count: Long) extends Action
+    case class AddedCommittedCountMetric(count: Long) extends Action
     case class SetLatencyMetric(latency: FiniteDuration) extends Action
     case class SetProcessingLatencyMetric(latency: FiniteDuration) extends Action
     case class SetE2ELatencyMetric(latency: FiniteDuration) extends Action
@@ -100,7 +101,8 @@ object MockEnvironment {
         badRowMaxSize           = 1000000,
         schemasToSkip           = List.empty,
         respectIgluNullability  = true,
-        exitOnMissingIgluSchema = false
+        exitOnMissingIgluSchema = false,
+        decompression           = DecompressionConfig(maxBytesInBatch = 5242880, maxBytesSinglePayload = 10000000)
       )
       MockEnvironment(state, env)
     }
@@ -164,13 +166,13 @@ object MockEnvironment {
   }
 
   def testMetrics(ref: Ref[IO, Vector[Action]]): Metrics[IO] = new Metrics[IO] {
-    def addReceived(count: Int): IO[Unit] =
+    def addReceived(count: Long): IO[Unit] =
       ref.update(_ :+ AddedReceivedCountMetric(count))
 
-    def addBad(count: Int): IO[Unit] =
+    def addBad(count: Long): IO[Unit] =
       ref.update(_ :+ AddedBadCountMetric(count))
 
-    def addCommitted(count: Int): IO[Unit] =
+    def addCommitted(count: Long): IO[Unit] =
       ref.update(_ :+ AddedCommittedCountMetric(count))
 
     def setLatency(latency: FiniteDuration): IO[Unit] =
@@ -187,6 +189,8 @@ object MockEnvironment {
 
     def setTableSnapshotsRetained(count: Long): IO[Unit] =
       ref.update(_ :+ SetTableSnaphotsRetained(count))
+
+    def scrape: IO[String] = IO.pure("")
 
     def report: Stream[IO, Nothing] = Stream.never[IO]
   }

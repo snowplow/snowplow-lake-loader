@@ -28,6 +28,7 @@ import com.snowplowanalytics.snowplow.streams.{
   SourceAndAck,
   TokenedEvents
 }
+import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 import com.snowplowanalytics.snowplow.runtime.{AppHealth, AppInfo, Retrying}
 
@@ -36,11 +37,12 @@ object TestSparkEnvironment {
   def build(
     target: TestConfig.Target,
     tmpDir: Path,
-    windows: List[List[TokenedEvents]]
+    windows: List[List[TokenedEvents]],
+    inMemBatchBytes: Long = 1000000L
   ): Resource[IO, Environment[IO]] = for {
     testConfig <- Resource.pure(TestConfig.defaults(target, tmpDir))
     source = testSourceAndAck(windows)
-    lakeWriter <- LakeWriter.build[IO](testConfig.spark, testConfig.output.good)
+    lakeWriter <- LakeWriter.build[IO](testConfig.spark, testConfig.output.good, respectIgluNullability = true)
     lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, dummyAppHealth, retriesConfig, PartialFunction.empty)
   } yield Environment(
     appInfo = appInfo,
@@ -54,13 +56,14 @@ object TestSparkEnvironment {
     lakeWriter              = lakeWriterWrapped,
     metrics                 = testMetrics,
     appHealth               = dummyAppHealth,
-    inMemBatchBytes         = 1000000L,
+    inMemBatchBytes         = inMemBatchBytes,
     cpuParallelism          = 1,
     windowing               = EventProcessingConfig.TimedWindows(1.minute, 1.0, 1),
     badRowMaxSize           = 1000000,
     schemasToSkip           = List.empty,
     respectIgluNullability  = true,
-    exitOnMissingIgluSchema = false
+    exitOnMissingIgluSchema = false,
+    decompression           = DecompressionConfig(maxBytesInBatch = 5242880, maxBytesSinglePayload = 10000000)
   )
 
   private val retriesConfig = Config.Retries(
@@ -97,14 +100,15 @@ object TestSparkEnvironment {
   }
 
   def testMetrics: Metrics[IO] = new Metrics[IO] {
-    def addReceived(count: Int): IO[Unit]                       = IO.unit
-    def addBad(count: Int): IO[Unit]                            = IO.unit
-    def addCommitted(count: Int): IO[Unit]                      = IO.unit
+    def addReceived(count: Long): IO[Unit]                      = IO.unit
+    def addBad(count: Long): IO[Unit]                           = IO.unit
+    def addCommitted(count: Long): IO[Unit]                     = IO.unit
     def setLatency(latency: FiniteDuration): IO[Unit]           = IO.unit
     def setProcessingLatency(latency: FiniteDuration): IO[Unit] = IO.unit
     def setE2ELatency(latency: FiniteDuration): IO[Unit]        = IO.unit
     def setTableDataFilesTotal(count: Long): IO[Unit]           = IO.unit
     def setTableSnapshotsRetained(count: Long): IO[Unit]        = IO.unit
+    def scrape: IO[String]                                      = IO.pure("")
     def report: Stream[IO, Nothing]                             = Stream.never[IO]
   }
 

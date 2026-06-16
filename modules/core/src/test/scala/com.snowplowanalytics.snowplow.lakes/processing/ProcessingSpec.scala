@@ -18,6 +18,7 @@ import cats.effect.testkit.TestControl
 
 import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData}
 import com.snowplowanalytics.snowplow.analytics.scalasdk.SnowplowEvent
+import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.{MockEnvironment, RuntimeService}
 import com.snowplowanalytics.snowplow.lakes.MockEnvironment.Action
 
@@ -34,6 +35,11 @@ class ProcessingSpec extends Specification with CatsEffect {
     Send failed events for an unrecognized schema $e7
     Crash and exit for an unrecognized schema, if exitOnMissingIgluSchema is true $e8
     Crash and exit if events have schemas with clashing column names $e9
+    Decompress and load zstd-compressed events $e10
+    Decompress and load gzip-compressed events $e11
+    Decompress and load mixed plain, zstd, and gzip events $e12
+    Send a corrupt zstd payload to the bad sink as a loader parsing error $e13
+    Send an oversized decompressed record as a size violation and load the rest $e14
   """
 
   def e1 = {
@@ -388,6 +394,151 @@ class ProcessingSpec extends Specification with CatsEffect {
     )).handleError { e =>
       e.getMessage must beEqualTo("schemas [clashing.a.b_c, clashing.a_b_c] have clashing column names")
     }
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e10 = {
+    val io = for {
+      tokened <- EventUtils.tokenedInputs(2, EventUtils.goodZstdCompressed)
+      control <- MockEnvironment.build(List(tokened))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v0000000001"),
+        Action.AddedReceivedCountMetric(2),
+        Action.AddedReceivedCountMetric(2),
+        Action.AppendedRowsToDataFrame("v0000000001", 4),
+        Action.CommittedToTheLake("v0000000001"),
+        Action.AddedCommittedCountMetric(4),
+        Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
+        Action.Checkpointed(tokened.map(_.ack)),
+        Action.RemovedDataFrameFromDisk("v0000000001")
+      )
+    )
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e11 = {
+    val io = for {
+      tokened <- EventUtils.tokenedInputs(2, EventUtils.goodGzipCompressed)
+      control <- MockEnvironment.build(List(tokened))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v0000000001"),
+        Action.AddedReceivedCountMetric(2),
+        Action.AddedReceivedCountMetric(2),
+        Action.AppendedRowsToDataFrame("v0000000001", 4),
+        Action.CommittedToTheLake("v0000000001"),
+        Action.AddedCommittedCountMetric(4),
+        Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
+        Action.Checkpointed(tokened.map(_.ack)),
+        Action.RemovedDataFrameFromDisk("v0000000001")
+      )
+    )
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e12 = {
+    // PayloadProvider sniffs each input ByteBuffer, separates into uncompressed/zstd/gzip groups,
+    // and emits one DecompressedTokenedEvents per non-empty group. So a single TokenedEvents with
+    // one plain + one zstd + one gzip buffer becomes three DTEs of one payload each.
+    val io = for {
+      tokened <- EventUtils.tokenedInputs(2, EventUtils.goodMixed)
+      control <- MockEnvironment.build(List(tokened))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v0000000001"),
+        Action.AddedReceivedCountMetric(1),
+        Action.AddedReceivedCountMetric(1),
+        Action.AddedReceivedCountMetric(1),
+        Action.AddedReceivedCountMetric(1),
+        Action.AddedReceivedCountMetric(1),
+        Action.AddedReceivedCountMetric(1),
+        Action.AppendedRowsToDataFrame("v0000000001", 6),
+        Action.CommittedToTheLake("v0000000001"),
+        Action.AddedCommittedCountMetric(6),
+        Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
+        Action.Checkpointed(tokened.map(_.ack)),
+        Action.RemovedDataFrameFromDisk("v0000000001")
+      )
+    )
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e13 = {
+    val io = for {
+      tokened <- EventUtils.tokenedInputs(1, EventUtils.corruptZstdCompressed)
+      control <- MockEnvironment.build(List(tokened))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v0000000001"),
+        Action.AddedReceivedCountMetric(1),
+        Action.AddedBadCountMetric(1),
+        Action.SentToBad(1),
+        Action.Checkpointed(tokened.map(_.ack)),
+        Action.RemovedDataFrameFromDisk("v0000000001")
+      )
+    )
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e14 = {
+    val io = for {
+      tokened <- EventUtils.tokenedInputs(1, EventUtils.goodWithOversizedRecord(oversizedBytes = 2000))
+      control <- MockEnvironment.build(List(tokened))
+      environment = control.environment.copy(
+                      decompression = DecompressionConfig(maxBytesInBatch = 5242880, maxBytesSinglePayload = 1000)
+                    )
+      _ <- Processing.stream(environment).compile.drain
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v0000000001"),
+        Action.AddedReceivedCountMetric(2),
+        Action.AddedBadCountMetric(1),
+        Action.SentToBad(1),
+        Action.AppendedRowsToDataFrame("v0000000001", 1),
+        Action.CommittedToTheLake("v0000000001"),
+        Action.AddedCommittedCountMetric(1),
+        Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetE2ELatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
+        Action.SetTableDataFilesTotal(123L),
+        Action.SetTableSnaphotsRetained(456L),
+        Action.Checkpointed(tokened.map(_.ack)),
+        Action.RemovedDataFrameFromDisk("v0000000001")
+      )
+    )
 
     TestControl.executeEmbed(io)
   }

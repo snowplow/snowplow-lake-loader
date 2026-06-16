@@ -20,6 +20,8 @@ class IcebergSpec extends AbstractSparkSpec {
 
   override def target: TestConfig.Target = TestConfig.Iceberg
 
+  override def supportsRequiredNestedFields: Boolean = true
+
   /** Reads the table back into memory, so we can make assertions on the app's output */
   override def readTable(spark: SparkSession, tmpDir: Path): DataFrame =
     spark.sql("select * from test_catalog.test.events")

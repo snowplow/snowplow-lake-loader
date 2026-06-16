@@ -1,3 +1,13 @@
+Version 0.10.0 (2026-05-11)
+---------------------------
+Bump common-streams to 0.24.1 (#45)
+Add software.amazon.awssdk:kms and align AWS SDK v2 with common-streams (#44)
+Bump dependencies to address CVEs (#42)
+Bump common-streams to 0.24.0 (#41)
+Restore nullability in case it gets lost by Spark's unionByName (#34)
+Add Claude Code GitHub Action workflow (#39)
+Update PUBLIC_REPO_URL in sync-public-main.yml
+
 Version 0.9.1 (2026-01-21)
 -------------------------
 Fix for TempTableAlreadyExistsException (#31)

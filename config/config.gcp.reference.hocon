@@ -184,6 +184,21 @@
     "iglu:com.acme/skipped4/jsonschema/*-*-*"
   ]
 
+  # -- Configures behavior of decompresses incoming data
+  "decompression": {
+
+    # -- A cutoff used when incrementally adding events to a batch. The batch is emitted immediately
+    # -- after this cutoff size is reached. This config parameter is needed to protect the app's memory.
+    # -- Bear in mind a 1MB compressed message could become HUGE after decompression.
+    # -- This is also used to batch together events from consecutive compressed records inside a chunk.
+    "maxBytesInBatch": 5242880
+
+    # -- Each individual event should not exceed this size after decompression.
+    # -- Events exceeding this size become a size violation type of bad row.
+    # -- This config parameter is needed to protect the app's memory.
+    "maxBytesSinglePayload": 10000000
+  }
+
   # -- Whether the loader should crash and exit if it fails to resolve an Iglu Schema.
   # -- We recommend `true` because Snowplow enriched events have already passed validation, so a missing schema normally
   # -- indicates an error that needs addressing.
@@ -226,6 +241,15 @@
 
         # -- Prefix used for the metric name when sending to statsd.
         "prefix": "snowplow.lakeloader"
+      }
+
+      # -- Expose runtime metrics on the Prometheus scrape endpoint served by the health probe port
+      "prometheus": {
+
+        # -- Map of key/value pairs added to every exported metric
+        "tags": {
+          "myTag": "xyz"
+        }
       }
     }
 

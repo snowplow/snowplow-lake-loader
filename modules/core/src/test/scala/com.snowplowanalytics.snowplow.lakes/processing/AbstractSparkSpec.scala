@@ -19,6 +19,7 @@ import org.specs2.Specification
 import org.specs2.matcher.MatchResult
 
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.types.{ArrayType, StructType}
 
 import scala.concurrent.duration.DurationInt
 import fs2.io.file.{Files, Path}
@@ -42,6 +43,10 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
     Create a unstruct_event column for a schema with no fields and additionalProperties true $e5
     Not create a contexts column for a schema with no fields and additionalProperties false $e6
     Create a contexts column for a schema with no fields and additionalProperties true $e7
+    Preserve required struct field nullability when schema evolves within a single window $e8
+    Preserve context array element field nullability and data values when context schema evolves within a single window $e9
+    Preserve required nested struct field nullability when schema evolves within a single window $e10
+    Keep a nested field nullable when it was nullable in an earlier batch even if the current batch schema marks it required $e11
   """
 
   /* Abstract definitions */
@@ -53,6 +58,13 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
   def sparkConfig(tmpDir: Path): Map[String, String]
 
   def target: TestConfig.Target
+
+  /**
+   * Whether this table format preserves NOT NULL constraints on inner struct fields across a
+   * write/read round-trip. Iceberg does; Delta does not track nullability at the inner-field level
+   * and always writes inner struct fields as nullable.
+   */
+  def supportsRequiredNestedFields: Boolean
 
   /* The specs */
 
@@ -367,6 +379,314 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
             cols must contain("contexts_myvendor_no_fields_1"),
             vs must contain(Some(List("""{"a":"xyz","b":"abc","_schema_version":"1-0-0"}"""))),
             df.count() must beEqualTo(4L)
+          ).reduce(_ and _)
+        }
+      }
+    }
+  }
+
+  // Spark's unionByName incorrectly promotes inner struct fields to nullable
+  // when merging DataFrames with different nested struct schemas
+  // (e.g. when a new Iglu patch-version adds a sub-field within a single processing window).
+  def e8 = Files[IO].tempDirectory.use { tmpDir =>
+    val ueGood700 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodschema", "jsonschema", SchemaVer.Full(7, 0, 0)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+
+    val ueGood701 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodschema", "jsonschema", SchemaVer.Full(7, 0, 1)),
+          Json.obj(
+            "col_a" -> Json.fromString("xyz"),
+            "col_b" -> Json.fromString("abc")
+          )
+        )
+      )
+    )
+
+    // Both schema versions are placed in the SAME window (single inner list) so that the patch
+    // version introduction happens via unionByName within one write cycle, not across windows.
+    val resources = for {
+      inputs1 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(ue = ueGood700)))
+      tokened1 <- Resource.eval(inputs1.traverse(_.tokened))
+      inputs2 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(ue = ueGood701)))
+      tokened2 <- Resource.eval(inputs2.traverse(_.tokened))
+      // inMemBatchBytes=1 forces each TokenedEvents to become its own Batched, giving separate
+      // localAppendRows calls with different inner struct schemas within the same window.
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened1 ++ tokened2), inMemBatchBytes = 1L)
+    } yield env
+
+    val io = resources.use { env =>
+      Processing.stream(env).compile.drain
+    }
+
+    io *> {
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking(readTable(spark, tmpDir)).map { df =>
+          import spark.implicits._
+
+          val colANullable = df.schema
+            .find(_.name == "unstruct_event_myvendor_goodschema_7")
+            .flatMap(_.dataType match {
+              case s: StructType => s.fields.find(_.name == "col_a")
+              case _             => None
+            })
+            .map(_.nullable)
+
+          val fieldAs = df.select("unstruct_event_myvendor_goodschema_7.col_a").as[String].collect().toSeq
+          val fieldBs = df.select("unstruct_event_myvendor_goodschema_7.col_b").as[String].collect().toSeq
+
+          val nullabilityAssertion: MatchResult[Any] =
+            if (supportsRequiredNestedFields)
+              colANullable must beSome(false)
+            else
+              colANullable must beSome[Boolean]
+
+          List[MatchResult[Any]](
+            nullabilityAssertion,
+            df.count() must beEqualTo(8L),
+            fieldAs must containTheSameElementsAs(Seq[String]("xyz", "xyz", "xyz", "xyz", null, null, null, null)),
+            fieldBs must containTheSameElementsAs(Seq[String]("abc", "abc", null, null, null, null, null, null))
+          ).reduce(_ and _)
+        }
+      }
+    }
+  }
+
+  // Verifies the ArrayType branch of restoreNullability end-to-end. When two batches in the same
+  // window carry context entities with different patch-version schemas, unionByName widens the
+  // array element struct's inner fields to nullable. restoreNullability must fix col_a back to NOT
+  // NULL and leave col_b (optional in 1-0-1) as nullable, and all data values must survive intact.
+  def e9 = Files[IO].tempDirectory.use { tmpDir =>
+    val ctx100 = SnowplowEvent.Contexts(
+      List(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodcontext", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+
+    val ctx101 = SnowplowEvent.Contexts(
+      List(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodcontext", "jsonschema", SchemaVer.Full(1, 0, 1)),
+          Json.obj(
+            "col_a" -> Json.fromString("xyz"),
+            "col_b" -> Json.fromString("abc")
+          )
+        )
+      )
+    )
+
+    val resources = for {
+      inputs1 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(contexts = ctx100)))
+      tokened1 <- Resource.eval(inputs1.traverse(_.tokened))
+      inputs2 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(contexts = ctx101)))
+      tokened2 <- Resource.eval(inputs2.traverse(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened1 ++ tokened2), inMemBatchBytes = 1L)
+    } yield env
+
+    val io = resources.use { env =>
+      Processing.stream(env).compile.drain
+    }
+
+    io *> {
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking(readTable(spark, tmpDir)).map { df =>
+          import spark.implicits._
+
+          val colANullable = df.schema
+            .find(_.name == "contexts_myvendor_goodcontext_1")
+            .flatMap(_.dataType match {
+              case ArrayType(s: StructType, _) => s.fields.find(_.name == "col_a")
+              case _                           => None
+            })
+            .map(_.nullable)
+
+          // Access fields via index into the array — each test event carries exactly one context entity.
+          val colAs = df
+            .filter("contexts_myvendor_goodcontext_1 is not null")
+            .selectExpr("contexts_myvendor_goodcontext_1[0].col_a as col_a")
+            .as[String]
+            .collect()
+            .toSeq
+          val colBs = df
+            .filter("contexts_myvendor_goodcontext_1 is not null")
+            .selectExpr("contexts_myvendor_goodcontext_1[0].col_b as col_b")
+            .as[String]
+            .collect()
+            .toSeq
+
+          val nullabilityAssertion: MatchResult[Any] =
+            if (supportsRequiredNestedFields)
+              colANullable must beSome(false)
+            else
+              colANullable must beSome[Boolean]
+
+          List[MatchResult[Any]](
+            nullabilityAssertion,
+            df.count() must beEqualTo(8L),
+            colAs must containTheSameElementsAs(Seq[String]("xyz", "xyz", "xyz", "xyz")),
+            colBs must containTheSameElementsAs(Seq[String]("abc", "abc", null, null))
+          ).reduce(_ and _)
+        }
+      }
+    }
+  }
+
+  // Verifies the recursive StructType branch of restoreNullability end-to-end. When the Iglu schema
+  // has a nested struct (struct-within-struct) and a new patch version adds an outer-level optional
+  // field, unionByName widens the inner struct's required field to nullable. restoreNullability must
+  // recursively restore the inner field back to NOT NULL.
+  def e10 = Files[IO].tempDirectory.use { tmpDir =>
+    val ue100 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "nestedschema", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("inner" -> Json.obj("id" -> Json.fromString("id_val")))
+        )
+      )
+    )
+
+    val ue101 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "nestedschema", "jsonschema", SchemaVer.Full(1, 0, 1)),
+          Json.obj(
+            "inner" -> Json.obj("id" -> Json.fromString("id_val")),
+            "tag" -> Json.fromString("tag_val")
+          )
+        )
+      )
+    )
+
+    val resources = for {
+      inputs1 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(ue = ue100)))
+      tokened1 <- Resource.eval(inputs1.traverse(_.tokened))
+      inputs2 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(ue = ue101)))
+      tokened2 <- Resource.eval(inputs2.traverse(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened1 ++ tokened2), inMemBatchBytes = 1L)
+    } yield env
+
+    val io = resources.use { env =>
+      Processing.stream(env).compile.drain
+    }
+
+    io *> {
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking(readTable(spark, tmpDir)).map { df =>
+          import spark.implicits._
+
+          val innerIdNullable = df.schema
+            .find(_.name == "unstruct_event_myvendor_nestedschema_1")
+            .flatMap(_.dataType match {
+              case s: StructType => s.fields.find(_.name == "inner")
+              case _             => None
+            })
+            .flatMap(_.dataType match {
+              case s: StructType => s.fields.find(_.name == "id")
+              case _             => None
+            })
+            .map(_.nullable)
+
+          val ids  = df.select("unstruct_event_myvendor_nestedschema_1.inner.id").as[String].collect().toSeq
+          val tags = df.select("unstruct_event_myvendor_nestedschema_1.tag").as[String].collect().toSeq
+
+          val nullabilityAssertion: MatchResult[Any] =
+            if (supportsRequiredNestedFields)
+              innerIdNullable must beSome(false)
+            else
+              innerIdNullable must beSome[Boolean]
+
+          List[MatchResult[Any]](
+            nullabilityAssertion,
+            df.count() must beEqualTo(8L),
+            ids must containTheSameElementsAs(Seq[String]("id_val", "id_val", "id_val", "id_val", null, null, null, null)),
+            tags must containTheSameElementsAs(Seq[String]("tag_val", "tag_val", null, null, null, null, null, null))
+          ).reduce(_ and _)
+        }
+      }
+    }
+  }
+
+  // Verifies that restoreNullability does not incorrectly tighten a field to NOT NULL when the
+  // accumulated view already contains nulls for it. Scenario: batch 1 carries 1-0-1 data where
+  // col_a is optional and absent (null); batch 2 carries 1-0-0 data where col_a is required.
+  // schemaddl treats each batch in isolation, so the batch-2 Iglu schema has col_a: NOT NULL.
+  // The accumulatedField.exists(_.nullable) guard must detect that the accumulated view has col_a
+  // as nullable and keep it so, preventing nullability-violation errors at write time.
+  def e11 = Files[IO].tempDirectory.use { tmpDir =>
+    val ue101 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "nullableevol", "jsonschema", SchemaVer.Full(1, 0, 1)),
+          Json.obj() // col_a absent — will be null in the struct
+        )
+      )
+    )
+
+    val ue100 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "nullableevol", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+
+    // batch 1 is 1-0-1 (col_a nullable, value absent), batch 2 is 1-0-0 (col_a required in isolation).
+    // Same window, forced into separate localAppendRows calls by inMemBatchBytes=1L.
+    val resources = for {
+      inputs1 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(ue = ue101)))
+      tokened1 <- Resource.eval(inputs1.traverse(_.tokened))
+      inputs2 <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good(ue = ue100)))
+      tokened2 <- Resource.eval(inputs2.traverse(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened1 ++ tokened2), inMemBatchBytes = 1L)
+    } yield env
+
+    val io = resources.use { env =>
+      Processing.stream(env).compile.drain
+    }
+
+    io *> {
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking(readTable(spark, tmpDir)).map { df =>
+          import spark.implicits._
+
+          val colANullable = df.schema
+            .find(_.name == "unstruct_event_myvendor_nullableevol_1")
+            .flatMap(_.dataType match {
+              case s: StructType => s.fields.find(_.name == "col_a")
+              case _             => None
+            })
+            .map(_.nullable)
+
+          val colAs = df
+            .filter("unstruct_event_myvendor_nullableevol_1 is not null")
+            .select("unstruct_event_myvendor_nullableevol_1.col_a")
+            .as[Option[String]]
+            .collect()
+            .toSeq
+
+          // For Iceberg, col_a must remain nullable: batch 1 stored null values, so marking it NOT
+          // NULL would cause write-time violations. The accumulated-schema guard preserves nullable.
+          val nullabilityAssertion: MatchResult[Any] =
+            if (supportsRequiredNestedFields)
+              colANullable must beSome(true)
+            else
+              colANullable must beSome[Boolean]
+
+          List[MatchResult[Any]](
+            nullabilityAssertion,
+            df.count() must beEqualTo(8L),
+            colAs must containTheSameElementsAs(Seq(None, None, Some("xyz"), Some("xyz")))
           ).reduce(_ and _)
         }
       }

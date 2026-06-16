@@ -12,10 +12,10 @@ package com.snowplowanalytics.snowplow.lakes.processing
 
 import cats.implicits._
 import cats.data.NonEmptyList
-import cats.{Applicative, Foldable, Functor}
+import cats.{Applicative, Foldable}
 import cats.effect.{Async, Deferred, Sync}
 import cats.effect.kernel.{Ref, Unique}
-import fs2.{Chunk, Pipe, Stream}
+import fs2.{Pipe, Stream}
 import io.circe.syntax._
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -23,15 +23,15 @@ import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.StructType
 
 import java.nio.charset.StandardCharsets
-import java.nio.ByteBuffer
 import java.time.Instant
 import scala.concurrent.duration.DurationLong
 
 import com.snowplowanalytics.iglu.client.resolver.registries.{Http4sRegistryLookup, RegistryLookup}
-import com.snowplowanalytics.snowplow.analytics.scalasdk.Event
+import com.snowplowanalytics.snowplow.analytics.scalasdk.{Event, ParsingError}
 import com.snowplowanalytics.snowplow.badrows.{BadRow, Processor => BadRowProcessor}
 import com.snowplowanalytics.snowplow.badrows.Payload.{RawPayload => BadRowRawPayload}
-import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, EventProcessor, ListOfList, TokenedEvents}
+import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, ListOfList}
+import com.snowplowanalytics.snowplow.streams.compression.Decompression._
 import com.snowplowanalytics.snowplow.lakes.{Environment, RuntimeService}
 import com.snowplowanalytics.snowplow.runtime.processing.BatchUp
 import com.snowplowanalytics.snowplow.runtime.syntax.foldable._
@@ -57,20 +57,36 @@ object Processing {
 
       implicit val lookup: RegistryLookup[F] = Http4sRegistryLookup(env.httpClient)
       val eventProcessingConfig              = EventProcessingConfig(env.windowing, env.metrics.setLatency)
+      val badProcessor                       = BadRowProcessor(env.appInfo.name, env.appInfo.version)
 
       Stream.eval(WindowState.factory[F]).flatMap { windowStateFactory =>
         env.source
-          .stream(eventProcessingConfig, eventProcessor(env, deferredTableExists.get, windowStateFactory))
+          .decompressedStream(
+            eventProcessingConfig,
+            env.decompression,
+            eventProcessor(env, badProcessor, deferredTableExists.get, windowStateFactory),
+            badProcessor,
+            toBadRow(badProcessor)
+          )
           .concurrently(runInBackground)
       }
 
     }
 
+  private def toBadRow(processor: BadRowProcessor): DecompressionError => BadRow.LoaderParsingError =
+    err =>
+      BadRow.LoaderParsingError(
+        processor,
+        ParsingError.RowDecodingError(
+          NonEmptyList.of(ParsingError.RowDecodingErrorInfo.UnhandledRowDecodingError(err.message))
+        ),
+        BadRowRawPayload(err.payload)
+      )
+
   /** Model used between stages of the processing pipeline */
 
   private case class ParseResult(
     events: List[Event],
-    bad: List[BadRow],
     originalBytes: Long,
     earliestCollectorTstamp: Option[Instant]
   )
@@ -84,17 +100,16 @@ object Processing {
 
   private def eventProcessor[F[_]: Async: RegistryLookup](
     env: Environment[F],
+    badProcessor: BadRowProcessor,
     deferredTableExists: F[Unit],
     windowStateFactory: WindowState.Factory[F]
-  ): EventProcessor[F] = { in =>
+  ): DecompressedEventProcessor[F] = { in =>
     val resources = for {
       windowState <- Stream.eval(windowStateFactory.build)
       _ <- Stream.eval(deferredTableExists)
       stateRef <- Stream.eval(Ref[F].of(windowState))
       _ <- manageDataFrame(env, windowState.viewName)
     } yield stateRef
-
-    val badProcessor = BadRowProcessor(env.appInfo.name, env.appInfo.version)
 
     resources.flatMap { stateRef =>
       in.through(processBatches(env, badProcessor, stateRef))
@@ -116,11 +131,10 @@ object Processing {
     env: Environment[F],
     badProcessor: BadRowProcessor,
     ref: Ref[F, WindowState]
-  ): Pipe[F, TokenedEvents, Nothing] =
+  ): Pipe[F, DecompressedTokenedEvents, Nothing] =
     _.through(rememberTokens(ref))
       .through(incrementReceivedCount(env))
       .through(parseBytes(env, badProcessor))
-      .through(handleParseFailures(env, badProcessor))
       .through(BatchUp.noTimeout(env.inMemBatchBytes))
       .through(transformBatch(env, badProcessor, ref))
 
@@ -162,14 +176,21 @@ object Processing {
         Logger[F].debug(s"An in-memory batch yielded zero good events.  Nothing will be saved to local disk.")
     }
 
-  private def rememberTokens[F[_]: Functor](ref: Ref[F, WindowState]): Pipe[F, TokenedEvents, Chunk[ByteBuffer]] =
-    _.evalMap { case TokenedEvents(events, token) =>
-      ref.update(state => state.copy(tokens = token :: state.tokens)).as(events)
+  private def rememberTokens[F[_]: Applicative](
+    ref: Ref[F, WindowState]
+  ): Pipe[F, DecompressedTokenedEvents, DecompressedTokenedEvents] =
+    _.evalTap { batch =>
+      batch.ack match {
+        case Some(token) => ref.update(state => state.copy(tokens = token :: state.tokens))
+        case None        => Applicative[F].unit
+      }
     }
 
-  private def incrementReceivedCount[F[_]](env: Environment[F]): Pipe[F, Chunk[ByteBuffer], Chunk[ByteBuffer]] =
-    _.evalTap { events =>
-      env.metrics.addReceived(events.size)
+  private def incrementReceivedCount[F[_]](
+    env: Environment[F]
+  ): Pipe[F, DecompressedTokenedEvents, DecompressedTokenedEvents] =
+    _.evalTap { batch =>
+      env.metrics.addReceived(batch.payloads.size.toLong + batch.bad.size.toLong)
     }
 
   private def rememberColumnNames[F[_]](ref: Ref[F, WindowState], fields: Vector[TypedTabledEntity]): F[Unit] = {
@@ -181,21 +202,22 @@ object Processing {
 
   private def parseBytes[F[_]: Async](
     env: Environment[F],
-    processor: BadRowProcessor
-  ): Pipe[F, Chunk[ByteBuffer], ParseResult] =
-    _.parEvalMapUnordered(env.cpuParallelism) { chunk =>
+    badProcessor: BadRowProcessor
+  ): Pipe[F, DecompressedTokenedEvents, ParseResult] =
+    _.parEvalMapUnordered(env.cpuParallelism) { batch =>
       for {
-        numBytes <- Sync[F].delay(Foldable[Chunk].sumBytes(chunk))
-        (badRows, events) <- Foldable[Chunk].traverseSeparateUnordered(chunk) { byteBuffer =>
-                               Sync[F].delay {
-                                 Event.parseBytes(byteBuffer).toEither.leftMap { failure =>
-                                   val payload = BadRowRawPayload(StandardCharsets.UTF_8.decode(byteBuffer).toString)
-                                   BadRow.LoaderParsingError(processor, failure, payload)
-                                 }
-                               }
-                             }
+        numBytes <- Sync[F].delay(Foldable[List].sumBytes(batch.payloads))
+        (parseFailures, events) <- Foldable[List].traverseSeparateUnordered(batch.payloads) { byteBuffer =>
+                                     Sync[F].delay {
+                                       Event.parseBytes(byteBuffer).toEither.leftMap { failure =>
+                                         val payload = BadRowRawPayload(StandardCharsets.UTF_8.decode(byteBuffer).toString)
+                                         BadRow.LoaderParsingError(badProcessor, failure, payload)
+                                       }
+                                     }
+                                   }
         earliestCollectorTstamp = events.view.map(_.collector_tstamp).minOption
-      } yield ParseResult(events, badRows, numBytes, earliestCollectorTstamp)
+        _ <- sendFailedEvents(env, badProcessor, parseFailures ::: batch.bad)
+      } yield ParseResult(events, numBytes, earliestCollectorTstamp)
     }
 
   private implicit def batchable: BatchUp.Batchable[ParseResult, Batched] = new BatchUp.Batchable[ParseResult, Batched] {
@@ -229,22 +251,14 @@ object Processing {
       }
     }
 
-  private def handleParseFailures[F[_]: Sync, A](
-    env: Environment[F],
-    badProcessor: BadRowProcessor
-  ): Pipe[F, ParseResult, ParseResult] =
-    _.evalTap { batch =>
-      sendFailedEvents(env, badProcessor, batch.bad)
-    }
-
-  private def sendFailedEvents[F[_]: Sync, A](
+  private def sendFailedEvents[F[_]: Sync](
     env: Environment[F],
     badProcessor: BadRowProcessor,
     bad: List[BadRow]
   ): F[Unit] =
     if (bad.nonEmpty) {
       val serialized = bad.map(badRow => BadRowsSerializer.withMaxSize(badRow, badProcessor, env.badRowMaxSize))
-      env.metrics.addBad(bad.size) *>
+      env.metrics.addBad(bad.size.toLong) *>
         env.badSink
           .sinkSimple(ListOfList.of(List(serialized)))
           .onError { case _ =>
@@ -264,7 +278,7 @@ object Processing {
           _ <- env.lakeWriter.commit(state.viewName)
           now <- Sync[F].realTime
           _ <- Logger[F].info(s"Window ${state.viewName} finished writing and committing ${state.numEvents} events to the lake.")
-          _ <- env.metrics.addCommitted(state.numEvents)
+          _ <- env.metrics.addCommitted(state.numEvents.toLong)
           _ <- env.metrics.setProcessingLatency(now - state.startTime.toEpochMilli.millis)
           _ <- state.earliestCollectorTstamp match {
                  case Some(earliestCollectorTstamp) =>

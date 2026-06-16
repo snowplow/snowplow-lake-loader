@@ -82,18 +82,22 @@ object LakeWriter {
 
   def build[F[_]: Async](
     config: Config.Spark,
-    target: Config.Target
+    target: Config.Target,
+    respectIgluNullability: Boolean
   ): Resource[F, LakeWriter[F]] = {
     val w = target match {
       case c: Config.Delta   => new DeltaWriter(c)
       case c: Config.Iceberg => new IcebergWriter(c)
     }
+    // Delta writes all inner struct fields as nullable anyway, so correction is a no-op there.
+    // If respectIgluNullability is disabled, all fields are nullable by schema design, so no correction needed.
+    val shouldRestoreNullability = respectIgluNullability && !target.isInstanceOf[Config.Delta]
     for {
       session <- SparkUtils.session[F](config, w, target)
       writerParallelism = chooseWriterParallelism()
       mutex1 <- Resource.eval(Mutex[F])
       mutex2 <- Resource.eval(Mutex[F])
-    } yield impl(session, w, writerParallelism, mutex1, mutex2)
+    } yield impl(session, w, writerParallelism, shouldRestoreNullability, mutex1, mutex2)
   }
 
   def withHandledErrors[F[_]: Async](
@@ -165,6 +169,7 @@ object LakeWriter {
     spark: SparkSession,
     w: Writer,
     writerParallelism: Int,
+    shouldRestoreNullability: Boolean,
     mutexForRemoteWriting: Mutex[F],
     mutexForLocalAppending: Mutex[F]
   ): LakeWriter[F] = new LakeWriter[F] {
@@ -180,7 +185,7 @@ object LakeWriter {
       schema: StructType
     ): F[Unit] =
       mutexForLocalAppending.lock.surround {
-        SparkUtils.localAppendRows(spark, viewName, rows, schema)
+        SparkUtils.localAppendRows(spark, viewName, rows, schema, shouldRestoreNullability)
       }
 
     def removeDataFrameFromDisk(viewName: String) =

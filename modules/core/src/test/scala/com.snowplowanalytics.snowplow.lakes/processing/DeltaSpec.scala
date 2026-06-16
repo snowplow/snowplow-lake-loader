@@ -20,6 +20,8 @@ class DeltaSpec extends AbstractSparkSpec {
 
   override def target: TestConfig.Target = TestConfig.Delta
 
+  override def supportsRequiredNestedFields: Boolean = false
+
   /** Reads the table back into memory, so we can make assertions on the app's output */
   override def readTable(spark: SparkSession, tmpDir: Path): DataFrame = {
     val location = (tmpDir / "events").toString
