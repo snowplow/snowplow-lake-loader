@@ -10,7 +10,7 @@
 
 package org.apache.spark.sql
 
-import org.apache.spark.SparkEnv
+import org.apache.spark.{MapOutputTrackerMaster, SparkEnv}
 import org.apache.spark.storage.RDDBlockId
 
 /**
@@ -28,14 +28,15 @@ object SnowplowSparkBlockProbe {
   /**
    * One partition of a persisted RDD. Flattened so callers need no private types.
    *
-   * `useOffHeap` and `useDisk` come from `BlockInfo.level`, which is the level the block was *put*
-   * with - `getCurrentBlockStatus` is the one that rewrites those to reflect residency. Only
-   * `memSize` and `diskSize` say where the bytes actually are.
+   * `useOffHeap`, `useDisk` and `deserialized` come from `BlockInfo.level`, which is the level the
+   * block was *put* with - `getCurrentBlockStatus` is the one that rewrites those to reflect
+   * residency. Only `memSize` and `diskSize` say where the bytes actually are.
    */
   final case class PersistedBlock(
     rddId: Int,
     useOffHeap: Boolean,
     useDisk: Boolean,
+    deserialized: Boolean,
     memSize: Long,
     diskSize: Long
   )
@@ -45,8 +46,30 @@ object SnowplowSparkBlockProbe {
     val blockManager = SparkEnv.get.blockManager
     spark.sparkContext.getPersistentRDDs.keys.toList.sorted.flatMap { rddId =>
       blockManager.getStatus(RDDBlockId(rddId, 0)).map { status =>
-        PersistedBlock(rddId, status.storageLevel.useOffHeap, status.storageLevel.useDisk, status.memSize, status.diskSize)
+        PersistedBlock(
+          rddId,
+          status.storageLevel.useOffHeap,
+          status.storageLevel.useDisk,
+          status.storageLevel.deserialized,
+          status.memSize,
+          status.diskSize
+        )
       }
     }
   }
+
+  /**
+   * Whether the map output tracker still holds this shuffle.
+   *
+   * `SparkEnv.mapOutputTracker` is typed as the base `MapOutputTracker`, which exposes only
+   * `unregisterShuffle`; `containsShuffle` is on `MapOutputTrackerMaster`, which is
+   * `private[spark]` and so unreachable from the specs that need it. Local mode always constructs
+   * that subclass.
+   */
+  def shuffleRegistered(shuffleId: Int): Boolean =
+    SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster].containsShuffle(shuffleId)
+
+  /** Every shuffle the map output tracker currently holds, for diffing around a call. */
+  def registeredShuffleIds: Set[Int] =
+    SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster].shuffleStatuses.keySet.toSet
 }

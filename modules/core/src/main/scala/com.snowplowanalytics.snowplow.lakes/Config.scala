@@ -92,7 +92,40 @@ object Config {
 
   case class Spark(
     taskRetries: Int,
+    writerPartitioning: WriterPartitioning,
     conf: Map[String, String]
+  )
+
+  /**
+   * How the loader spreads a window's events over the Spark partitions that write to the lake.
+   *
+   * The partition count is always `writerParallelism` and is not configurable, because one Spark
+   * task slot must be left free for the per-batch handover. See `processing.WriterPartitioner`.
+   *
+   * @param splitsPerFairShare
+   *   How finely to cut an event name, as a fraction of a fair share: the loader aims for pieces of
+   *   `fairShare / splitsPerFairShare` events. Smaller pieces give the bin-packer finer-grained
+   *   items to balance the partitions with, at the cost of an output file per extra piece.
+   * @param minEventsPerSplit
+   *   A hard floor on how small a piece may be. It caps the number of pieces rather than their
+   *   target size, so no piece ever holds fewer events than this - and an event name is therefore
+   *   split at all only once it has at least twice this many events. Without it, splitting is
+   *   purely relative to a fair share, so a large loader receiving a slow trickle would cut a
+   *   handful of events apart and write a parquet file for each one.
+   *
+   * `WriterPartitioner` splits until no item is larger than a piece, so greedy packing leaves the
+   * heaviest partition within one piece of a fair share - but only where it takes the split plan,
+   * which it declines when the balance it buys does not repay the output files. Both settings
+   * therefore trade files for a tighter commit rather than buying balance outright.
+   *
+   * The floor is what an event name below twice it cannot be split, so a window of a few such names
+   * can spread unevenly over the partitions and no setting changes that. That is the trade the
+   * floor exists to make: such a window is small enough to commit well inside its window whatever
+   * the spread, and whole output files are worth more there than even writer threads.
+   */
+  case class WriterPartitioning(
+    splitsPerFairShare: Int,
+    minEventsPerSplit: Int
   )
 
   case class Metrics(
@@ -128,6 +161,7 @@ object Config {
     implicit val icebergCatalog     = deriveConfiguredDecoder[IcebergCatalog]
     implicit val target             = deriveConfiguredDecoder[Target]
     implicit val output             = deriveConfiguredDecoder[Output[Sink]]
+    implicit val writerPartitioning = deriveConfiguredDecoder[WriterPartitioning]
     implicit val spark              = deriveConfiguredDecoder[Spark]
     implicit val sentryDecoder      = Sentry.ConfigM.sentryDecoder
     implicit val metricsDecoder     = deriveConfiguredDecoder[Metrics]

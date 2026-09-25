@@ -1,3 +1,17 @@
+Version 0.14.0 (2026-09-17)
+---------------------------
+Bump dependencies for 0.14.0 release (#97)
+Bump common-streams to 0.27.0 (#94)
+Choose the commit's partitioning instead of sampling for it (#75)
+Log the table's properties during startup (#93)
+Stage batches on the heap in serialized form (#89)
+Refresh the cached Iceberg table after a failed commit (#91)
+Report Spark's disk and memory usage as Prometheus metrics (#90)
+Release a window's staged batches once its shuffle is materialized (#81)
+Write to Iceberg with the clustered writer (#86)
+Stop the table metrics query stalling in-window processing (#84)
+Document the loader's runtime design in CLAUDE.md
+
 Version 0.13.0 (2026-09-07)
 ---------------------------
 Open jdk.internal.ref so off-heap blocks bypass the direct buffer pool (#78)

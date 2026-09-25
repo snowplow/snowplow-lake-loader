@@ -56,6 +56,13 @@ object MockEnvironment {
     case class RemovedDataFrameFromDisk(viewName: String) extends Action
     case class CommittedToTheLake(viewName: String) extends Action
 
+    /**
+     * The histogram is on the action because it is the only thing that pins `countEventNames`: it
+     * otherwise reaches nothing assertable, since a wrong partition assignment is a slow commit
+     * rather than a failure.
+     */
+    case class PreparedCommit(viewName: String, eventNameCounts: Map[Option[String], Int]) extends Action
+
     /* Metrics */
     case class AddedReceivedCountMetric(count: Long) extends Action
     case class AddedBadCountMetric(count: Long) extends Action
@@ -65,6 +72,10 @@ object MockEnvironment {
     case class SetE2ELatencyMetric(latency: FiniteDuration) extends Action
     case class SetTableDataFilesTotal(count: Long) extends Action
     case class SetTableSnaphotsRetained(count: Long) extends Action
+    case class SetShuffleDiskBytes(bytes: Long) extends Action
+    case class SetStorageMemoryBytes(bytes: Long) extends Action
+    case class SetStorageDiskBytes(bytes: Long) extends Action
+    case class SetDiskBytes(bytes: Long) extends Action
 
     /* Health */
     case class BecameUnhealthy(service: RuntimeService) extends Action
@@ -81,7 +92,12 @@ object MockEnvironment {
    * @return
    *   An environment and a Ref that records the actions make by the environment
    */
-  def build(windows: List[List[TokenedEvents]]): IO[MockEnvironment] =
+  def build(
+    windows: List[List[TokenedEvents]],
+    diskBytes: Option[Long]                            = Some(1415L),
+    storageUsage: Option[LakeWriter.BlockManagerUsage] = Some(LakeWriter.BlockManagerUsage(1011L, 1213L)),
+    sparkUsageReadFails: Boolean                       = false
+  ): IO[MockEnvironment] =
     for {
       state <- Ref[IO].of(Vector.empty[Action])
       source = testSourceAndAck(windows, state)
@@ -92,7 +108,7 @@ object MockEnvironment {
         badSink                 = testSink(state),
         resolver                = Resolver[IO](Nil, None),
         httpClient              = testHttpClient,
-        lakeWriter              = testLakeWriter(state),
+        lakeWriter              = testLakeWriter(state, diskBytes, storageUsage, sparkUsageReadFails),
         metrics                 = testMetrics(state),
         appHealth               = testAppHealth(state),
         inMemBatchBytes         = 1000000L,
@@ -107,7 +123,12 @@ object MockEnvironment {
       MockEnvironment(state, env)
     }
 
-  private def testLakeWriter(state: Ref[IO, Vector[Action]]): LakeWriter.WithHandledErrors[IO] = new LakeWriter.WithHandledErrors[IO] {
+  private def testLakeWriter(
+    state: Ref[IO, Vector[Action]],
+    diskBytes: Option[Long],
+    storageUsage: Option[LakeWriter.BlockManagerUsage],
+    sparkUsageReadFails: Boolean
+  ): LakeWriter.WithHandledErrors[IO] = new LakeWriter.WithHandledErrors[IO] {
     def createTable: IO[Unit] =
       IO.sleep(TimeTakenToCreateTable) *> state.update(_ :+ CreatedTable)
 
@@ -124,12 +145,24 @@ object MockEnvironment {
     def removeDataFrameFromDisk(viewName: String): IO[Unit] =
       state.update(_ :+ RemovedDataFrameFromDisk(viewName))
 
+    def prepareCommit(viewName: String, eventNameCounts: Map[Option[String], Int]): IO[Unit] =
+      state.update(_ :+ PreparedCommit(viewName, eventNameCounts))
+
     def commit(viewName: String): IO[Unit] =
       state.update(_ :+ CommittedToTheLake(viewName))
 
     def getTableDataFilesTotal: IO[Option[Long]] = IO(Some(123L))
 
     def getTableSnapshotsRetained: IO[Option[Long]] = IO(Some(456L))
+
+    def getShuffleDiskBytes: IO[Long] =
+      if (sparkUsageReadFails) IO.raiseError(new RuntimeException("boom reading shuffle disk bytes")) else IO.pure(789L)
+
+    def getStorageUsage(viewName: String): IO[Option[LakeWriter.BlockManagerUsage]] = IO.pure(storageUsage)
+
+    def getDiskBytes: IO[Option[Long]] = IO.pure(diskBytes)
+
+    def recordBlockManagerPeak(viewName: String): IO[Unit] = IO.unit
   }
 
   private def testSourceAndAck(windows: List[List[TokenedEvents]], state: Ref[IO, Vector[Action]]): SourceAndAck[IO] =
@@ -189,6 +222,18 @@ object MockEnvironment {
 
     def setTableSnapshotsRetained(count: Long): IO[Unit] =
       ref.update(_ :+ SetTableSnaphotsRetained(count))
+
+    def setShuffleDiskBytes(bytes: Long): IO[Unit] =
+      ref.update(_ :+ SetShuffleDiskBytes(bytes))
+
+    def setStorageMemoryBytes(bytes: Long): IO[Unit] =
+      ref.update(_ :+ SetStorageMemoryBytes(bytes))
+
+    def setStorageDiskBytes(bytes: Long): IO[Unit] =
+      ref.update(_ :+ SetStorageDiskBytes(bytes))
+
+    def setDiskBytes(bytes: Long): IO[Unit] =
+      ref.update(_ :+ SetDiskBytes(bytes))
 
     def scrape: IO[String] = IO.pure("")
 

@@ -17,14 +17,20 @@ import cats.effect.kernel.Resource
 import cats.effect.testing.specs2.CatsEffect
 import fs2.io.file.Files
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{Row, SnowplowSparkBlockProbe, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SnowplowSparkBlockProbe, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{CreateArray, Literal}
+import org.apache.spark.sql.catalyst.plans.logical.RepartitionByExpression
 import org.apache.spark.sql.types.{ArrayType, DateType, StringType, StructField, StructType, TimestampType}
 import org.specs2.Specification
 
 import java.net.URI
+import java.nio.charset.StandardCharsets
 import java.time.{Instant, LocalDate}
 import java.time.temporal.ChronoUnit
+import java.util.UUID
+
+import scala.jdk.CollectionConverters._
 
 import com.snowplowanalytics.snowplow.lakes.{Config, TestConfig}
 import com.snowplowanalytics.snowplow.lakes.fs.LakeLoaderFileSystem
@@ -55,10 +61,23 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     Round-trip the java.time values emitted by SparkCaster, which need a lenient encoder $e14
     Encode every row of a batch distinctly, not repeat the last one $e15
     Stage the batch in off-heap memory, not on the JVM heap, when asked to $e16
+  SparkUtils.prepareFinalDataFrame should:
+    Balance the partitions within writerParallelism when one event_name dominates the window $e24
+    Keep a small event_name whole, in a single partition, so output files are not fragmented $e25
+    Write a slow trickle into a single partition, instead of one file per event $e26
+    Balance a window whose events all have a null event_name, with no special case for it $e27
+    Fold a split key's partitions into one literal array, rather than build one per row $e28
   SparkUtils.dropView should:
     Release the window's checkpoint blocks, at either staging level, instead of leaving them to the ContextCleaner $e18
+    Release the window's shuffle as well, when prepareCommit left one behind $e19
+  SparkUtils.materializeShuffle should:
+    Leave the staged blocks releasable without breaking the returned DataFrame $e20
+    Keep the staged blocks, but still replace the view, when writerParallelism leaves no exchange $e21
+  SparkUtils.readFinalDataFrame should:
+    Stamp load_tstamp afresh on every read, so a retried commit does not reuse an older value $e22
   SparkUtils.session built from TestConfig should:
     Reach the staging decision the whole-loader specs expect, on both paths $e17
+    Give Spark the core count it was asked for, even against a spark.master in spark.conf $e23
   SparkUtils.session for a Delta target on GCS should:
     Resolve fs.gs.impl to LakeLoaderFileSystem with the hadoop-gcp connector as delegate $e12
   """
@@ -803,7 +822,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
         case d: Config.Delta => d
         case other           => throw new IllegalStateException(s"Expected a Delta target but got $other")
       }
-      SparkUtils.session[IO](config.spark, new DeltaWriter(delta), delta).use { spark =>
+      SparkUtils.session[IO](config.spark, new DeltaWriter(delta), delta, cores = 2).use { spark =>
         SparkUtils
           .stageBatchesOffHeap[IO](spark)
           .map(offHeap => (offHeap, spark.sparkContext.getConf.get("spark.memory.storageFraction")))
@@ -814,6 +833,31 @@ class SparkUtilsSpec extends Specification with CatsEffect {
       requested <- decisionFor(stageOffHeap = true)
       default <- decisionFor(stageOffHeap = false)
     } yield (requested must beEqualTo((true, "0"))) and (default must beEqualTo((false, "0")))
+  }
+
+  // writerParallelism is derived from the same core count this master is built from, so the
+  // reserved task slot only exists if the count actually reaches Spark. spark.conf is unvalidated
+  // and spark.master is a legitimate key in it, so the loader applies master after that map -
+  // otherwise a deployment could halve Spark's slots while writerParallelism kept counting the
+  // whole machine, and nothing would say so.
+  // Depends on no other spec holding a session: `getOrCreate` returns a live one and ignores the
+  // builder's master, which would make this assert about someone else's session. `fork := true` with
+  // sbt's default `testForkedParallel` of false is what keeps suites from overlapping, and every
+  // session-creating spec here is `sequential`. Unlike e17 and e12, this one asserts a value that
+  // differs between sessions, so it is the example that would report the breakage.
+  def e23 = Files[IO].tempDirectory.use { tmpDir =>
+    val base = TestConfig.defaults(TestConfig.Delta, tmpDir)
+    val delta = base.output.good match {
+      case d: Config.Delta => d
+      case other           => throw new IllegalStateException(s"Expected a Delta target but got $other")
+    }
+    val sparkConfig = base.spark.copy(conf = base.spark.conf + ("spark.master" -> "local[1]"))
+
+    SparkUtils.session[IO](sparkConfig, new DeltaWriter(delta), delta, cores = 3).use { spark =>
+      IO.blocking((spark.sparkContext.master, spark.sparkContext.defaultParallelism))
+    } map { case (master, parallelism) =>
+      (master.startsWith("local[3,"), parallelism) must beEqualTo((true, 3))
+    }
   }
 
   // Dropping the temp view only removes the catalog entry; the checkpoint blocks stay in the block
@@ -834,7 +878,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
         _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
         rdds <- List(Row("v1"), Row("v2"), Row("v3")).traverse(append)
         persistedWhileOpen <- IO.blocking(rdds.map(_.id).count(spark.sparkContext.getPersistentRDDs.contains))
-        _ <- SparkUtils.dropView[IO](spark, viewName, rdds)
+        _ <- SparkUtils.dropView[IO](spark, viewName, rdds, None)
         persistedAfterDrop <- IO.blocking(rdds.map(_.id).count(spark.sparkContext.getPersistentRDDs.contains))
       } yield (rdds.size, persistedWhileOpen, persistedAfterDrop)
     }
@@ -843,6 +887,93 @@ class SparkUtilsSpec extends Specification with CatsEffect {
       onHeap <- releasedOnDrop("test_unpersist_on_drop_e18_heap", stageOffHeap = false)
       offHeap <- releasedOnDrop("test_unpersist_on_drop_e18_offheap", stageOffHeap = true)
     } yield (onHeap must beEqualTo((3, 3, 0))) and (offHeap must beEqualTo((3, 3, 0)))
+  }
+
+  // dropView is the guaranteed finalizer, so it has to finish whatever prepareCommit started -
+  // including the shuffle, which by then is the only copy of the window's data.
+  def e19 = withSpark.use { spark =>
+    val viewName = "test_drop_releases_shuffle_e19"
+
+    for {
+      _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
+      rdd <- localAppendRows(spark, viewName, eventRows("e1", "e2"), eventSchema, shouldRestoreNullability = true)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
+      shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
+      shuffleId = shuffled.shuffle.map(_.id).getOrElse(throw new IllegalStateException("Expected a shuffle id"))
+      registeredBefore <- IO.blocking(SnowplowSparkBlockProbe.shuffleRegistered(shuffleId))
+      _ <- SparkUtils.dropView[IO](spark, viewName, List(rdd), shuffled.shuffle.map(_.id))
+      registeredAfter <- IO.blocking(SnowplowSparkBlockProbe.shuffleRegistered(shuffleId))
+    } yield (registeredBefore, registeredAfter) must beEqualTo((true, false))
+  }
+
+  // The SparkUtils-level statement of the property SnowplowInternalSparkBridgeSpec e7 pins, over
+  // the composition LakeWriter.prepareCommit actually performs: after materializeShuffle and
+  // replaceView, the staged blocks are dead and reading the view still works.
+  def e20 = withSpark.use { spark =>
+    val viewName = "test_materialize_shuffle_e20"
+
+    for {
+      _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
+      rdd <- localAppendRows(spark, viewName, eventRows("e1", "e2", "e3"), eventSchema, shouldRestoreNullability = true)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 2, defaultPartitioning, pageViewCounts(3))
+      shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
+      _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
+      _ <- SparkUtils.releaseStagedBatches[IO](List(rdd))
+      persisted <- IO.blocking(spark.sparkContext.getPersistentRDDs.contains(rdd.id))
+      collected <- IO.blocking(spark.table(viewName).collect().toList.map(_.getAs[String]("event_id")).sorted)
+    } yield (persisted, collected) must beEqualTo((false, List("e1", "e2", "e3")))
+  }
+
+  // chooseWriterParallelism is availableProcessors - 1, so a single-core CI machine takes the
+  // coalesce branch and there is no exchange to hand the window over to. prepareCommit must then
+  // keep the staged batches, because the view still reads from them - but it must still replace the
+  // view, or the write would go over the accumulated union rather than the coalesced form. The
+  // partition count is what separates those two: one batch stages as one partition, so a view still
+  // holding the union of two batches has two. Neither half is exercised on a multi-core dev machine.
+  def e21 = withSpark.use { spark =>
+    val viewName = "test_no_exchange_e21"
+
+    for {
+      _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
+      rdds <- List(eventRows("e1"), eventRows("e2")).traverse(
+                localAppendRows(spark, viewName, _, eventSchema, shouldRestoreNullability = true)
+              )
+      partitionsBefore <- IO.blocking(spark.table(viewName).queryExecution.toRdd.getNumPartitions)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 1, defaultPartitioning, pageViewCounts(2))
+      shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
+      _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
+      persisted <- IO.blocking(rdds.forall(rdd => spark.sparkContext.getPersistentRDDs.contains(rdd.id)))
+      partitionsAfter <- IO.blocking(spark.table(viewName).queryExecution.toRdd.getNumPartitions)
+      collected <- IO.blocking(spark.table(viewName).collect().toList.map(_.getAs[String]("event_id")).sorted)
+    } yield (shuffled.shuffle.map(_.id), persisted, partitionsBefore, partitionsAfter, collected) must beEqualTo(
+      (Option.empty[Int], true, 2, 1, List("e1", "e2"))
+    )
+  }
+
+  // load_tstamp is assigned when the view is read back, not before the shuffle, so that a retried
+  // commit stamps its rows with the attempt that succeeds. Assigning it earlier would fix the value
+  // in the DataFrame prepareCommit registers, and the setup-error retry has no attempt cap, so rows
+  // could land arbitrarily long after the timestamp they carry. Also pins that one read yields a
+  // single literal, which is what keeps the writers' open-file count down - see `Writer.write`.
+  def e22 = withSpark.use { spark =>
+    val viewName = "test_load_tstamp_per_read_e22"
+
+    def stampsFromOneAttempt =
+      for {
+        df <- SparkUtils.readFinalDataFrame[IO](spark, viewName)
+        stamps <- IO.blocking(df.collect().toList.map(_.getAs[java.sql.Timestamp]("load_tstamp")).distinct)
+      } yield stamps
+
+    for {
+      _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
+      _ <- localAppendRows(spark, viewName, eventRows("e1", "e2"), eventSchema, shouldRestoreNullability = true)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
+      shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
+      _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
+      first <- stampsFromOneAttempt
+      _ <- IO.sleep(10.millis)
+      second <- stampsFromOneAttempt
+    } yield (shuffled.shuffle.isDefined, first.size, second.size, first != second) must beEqualTo((true, 1, 1, true))
   }
 
   // Guards the LakeLoaderFileSystem override on GCS: the gs scheme resolves to hadoop-gcp via
@@ -856,7 +987,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
       case d: Config.Delta => d.copy(location = new URI("gs://bucket/events"))
       case other           => throw new IllegalStateException(s"Expected a Delta target but got $other")
     }
-    SparkUtils.session[IO](config.spark, new DeltaWriter(delta), delta).use { spark =>
+    SparkUtils.session[IO](config.spark, new DeltaWriter(delta), delta, cores = 2).use { spark =>
       IO.blocking {
         val contextConf = spark.sparkContext.hadoopConfiguration
         val derivedConf = spark.sessionState.newHadoopConf()
@@ -869,6 +1000,97 @@ class SparkUtilsSpec extends Specification with CatsEffect {
       }
     }
   }
+
+  // A window whose biggest event_name is more than a fair share is the case a hash cannot handle:
+  // one name means one task, and that task becomes the commit's critical path. Splitting it and
+  // bin-packing the pieces must bring every partition back near an even share, within
+  // writerParallelism partitions.
+  def e24 = withSpark.use { spark =>
+    val viewName = "test_split_partitioning_e24"
+    for {
+      _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, skewedCounts)
+      numPartitions <- IO.blocking(df.rdd.getNumPartitions)
+      placements <- IO.blocking(collectPlacements(df))
+      partitionSizes = placements.groupBy(_._2).view.mapValues(_.size).values.toList
+      hotPartitions  = placements.collect { case ("hot", partition) => partition }.distinct.size
+    } yield {
+      // An even share is the floor of what any assignment into 6 partitions can achieve, so the
+      // assertion is that we land close to it rather than under it.
+      val evenShare = totalSkewedEvents.toDouble / 6
+      (numPartitions must_== 6) and
+        (placements.size must_== totalSkewedEvents) and
+        (partitionSizes.max.toDouble must beLessThan(evenShare * 1.1)) and
+        (hotPartitions must beGreaterThan(1))
+    }
+  }
+
+  // The other half of the trade-off: a name small enough to fit in one task must not be scattered,
+  // because the lake is partitioned by event_name and every extra partition holding a name costs
+  // another, smaller, output file.
+  def e25 = withSpark.use { spark =>
+    val viewName = "test_small_name_kept_whole_e25"
+    for {
+      _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, skewedCounts)
+      placements <- IO.blocking(collectPlacements(df))
+      spreadOfColdNames = placements.collect { case (name, partition) if name.startsWith("cold_") => (name, partition) }.distinct
+    } yield spreadOfColdNames.groupBy(_._1).values.map(_.size).toList.distinct must_== List(1)
+  }
+
+  // A vertically large loader receiving a slow trickle. A fair share is a fraction of an event
+  // here, so without the minEventsPerSplit floor the two events would be split apart and written
+  // as two parquet files. They share an event_name, so one file is achievable and is what we want.
+  def e26 = withSpark.use { spark =>
+    val viewName = "test_trickle_partitioning_e26"
+    val counts   = Map(Option("hot") -> 2)
+    for {
+      _ <- IO.blocking(windowOf(spark, counts).createOrReplaceTempView(viewName))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 31, tricklePartitioning, counts)
+      placements <- IO.blocking(collectPlacements(df))
+    } yield (placements.size must_== 2) and (placements.map(_._2).distinct.size must_== 1)
+  }
+
+  // A null event_name is packed like any other key, with no special case anywhere: 600 nameless
+  // rows over 6 partitions at minEventsPerSplit 100, so a fair share is 100 and the planner cuts
+  // them into 6 even pieces.
+  def e27 = withSpark.use { spark =>
+    val viewName = "test_nameless_partitioning_e27"
+    val counts   = Map(Option.empty[String] -> 600)
+    for {
+      _ <- IO.blocking(windowOf(spark, counts).createOrReplaceTempView(viewName))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, counts)
+      numPartitions <- IO.blocking(df.rdd.getNumPartitions)
+      perPartition <- IO.blocking(df.rdd.mapPartitions(rows => Iterator(rows.size)).collect().toList)
+    } yield (numPartitions must_== 6) and
+      (perPartition.sum must_== 600) and
+      (perPartition.count(_ > 0) must_== 6)
+  }
+
+  // A `CreateArray` surviving the optimizer would allocate an ArrayData per row, on the largest
+  // keys in the window, and produce identical results - so it is invisible to every other example
+  // here, and this one asserts on the plan instead.
+  //
+  // The literal half is what stops it passing vacuously: if splitting stopped happening there would
+  // be no array of either kind.
+  def e28 = withSpark.use { spark =>
+    val viewName = "test_partition_array_folded_e28"
+    for {
+      _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, skewedCounts)
+      // The repartition's own expression, not whatever else the plan holds, so this cannot pass on
+      // a folded array that came from somewhere else - and fails loudly if the plan shape moves.
+      expressions <- IO.blocking {
+                       df.queryExecution.optimizedPlan match {
+                         case r: RepartitionByExpression => r.partitionExpressions.flatMap(_.collect { case e => e })
+                         case other => throw new IllegalStateException(s"Expected a repartition, got ${other.nodeName}")
+                       }
+                     }
+      unfolded = expressions.collect { case c: CreateArray => c }
+      folded   = expressions.collect { case l: Literal if l.dataType.isInstanceOf[ArrayType] => l }
+    } yield (unfolded must beEmpty) and (folded must not(beEmpty))
+  }
+
 }
 
 object SparkUtilsSpec {
@@ -896,6 +1118,73 @@ object SparkUtilsSpec {
       _ <- SparkUtils.appendStagedBatch[IO](spark, viewName, staged.df, igluSchema, shouldRestoreNullability)
     } yield staged.checkpointed
 
+  /**
+   * `reference.conf`'s values, for the examples whose subject is something other than splitting.
+   */
+  private val defaultPartitioning =
+    Config.WriterPartitioning(splitsPerFairShare = 4, minEventsPerSplit = 5000)
+
+  // The skew fixture is only 10000 events, so it needs a floor scaled to it. Otherwise the floor
+  // keeps every name whole and there is no splitting left to assert on.
+  private val skewPartitioning =
+    Config.WriterPartitioning(splitsPerFairShare = 4, minEventsPerSplit = 100)
+
+  // The floor at its reference.conf default, which is what makes the trickle case interesting.
+  private val tricklePartitioning =
+    Config.WriterPartitioning(splitsPerFairShare = 4, minEventsPerSplit = 5000)
+
+  /** The histogram of a batch from `eventRows`, whose rows all carry the same event_name. */
+  private def pageViewCounts(numEvents: Int): Map[Option[String], Int] =
+    Map(Some("page_view") -> numEvents)
+
+  // 6000 events of one dominant name, 2000 of a second, and 2000 spread over a long tail of 20.
+  // Over 6 writer threads a fair share is 1666, so "hot" and "warm" both have to be split.
+  private val skewedCounts: Map[Option[String], Int] =
+    Map(Option("hot") -> 6000, Option("warm") -> 2000) ++ (1 to 20).map(i => Option(f"cold_$i%02d") -> 100).toMap
+
+  private val totalSkewedEvents: Int = skewedCounts.values.sum
+
+  private def skewedWindow(spark: SparkSession): DataFrame =
+    windowOf(spark, skewedCounts)
+
+  /**
+   * The two columns `prepareFinalDataFrame` partitions on. event_ids are derived from a counter
+   * rather than random, so that the hash-based placement is identical on every run.
+   */
+  private def windowOf(spark: SparkSession, counts: Map[Option[String], Int]): DataFrame = {
+    val rows = counts.toList.sortBy(_._1).flatMap { case (name, count) =>
+      (1 to count).map { i =>
+        Row(name.orNull, UUID.nameUUIDFromBytes(s"${name.getOrElse("<null>")}-$i".getBytes(StandardCharsets.UTF_8)).toString)
+      }
+    }
+    val schema = StructType(
+      Array(
+        StructField("event_name", StringType, nullable = true),
+        StructField("event_id", StringType, nullable   = false)
+      )
+    )
+    spark.createDataFrame(rows.asJava, schema)
+  }
+
+  /** Every event's (event_name, spark partition index), which is what both properties are about. */
+  private def collectPlacements(df: DataFrame): List[(String, Int)] =
+    df.rdd
+      .mapPartitionsWithIndex { case (partition, rows) => rows.map(row => (row.getAs[String]("event_name"), partition)) }
+      .collect()
+      .toList
+
+  // prepareFinalDataFrame repartitions by event_name and event_id, so any schema reaching it must
+  // carry both columns.
+  private val eventSchema = StructType(
+    Array(
+      StructField("event_id", StringType, nullable   = false),
+      StructField("event_name", StringType, nullable = false)
+    )
+  )
+
+  private def eventRows(ids: String*): NonEmptyList[Row] =
+    NonEmptyList.fromListUnsafe(ids.toList.map(id => Row(id, "page_view")))
+
   private def withSpark: Resource[IO, SparkSession] = {
     val build = IO.blocking(
       SparkSession
@@ -909,6 +1198,9 @@ object SparkUtilsSpec {
         // pool and have to borrow from the execution region. e16 passing is what proves borrowing
         // works, so do not "fix" this by giving storage a guaranteed share.
         .config("spark.memory.storageFraction", "0")
+        // Matches reference.conf, and load-bearing here: materializeShuffle degrades to a no-op
+        // under AQE, which would leave the examples below asserting nothing.
+        .config("spark.sql.adaptive.enabled", "false")
         .getOrCreate()
     )
     Resource.make(build)(s => IO.blocking(s.close()))

@@ -69,6 +69,25 @@ object EventUtils {
       TestBatch(List(event1, event2))
     }
 
+  /**
+   * A batch whose events all carry the given `event_name`.
+   *
+   * `Event.minimal` leaves `event_name` unset, so every other fixture here yields a histogram of a
+   * single `None` key. Use this where telling one key from another is the point.
+   */
+  def named(eventName: String): IO[TestBatch] =
+    for {
+      eventId1 <- IO.randomUUID
+      eventId2 <- IO.randomUUID
+      collectorTstamp <- IO.realTimeInstant
+    } yield TestBatch(
+      List(eventId1, eventId2).map { eventId =>
+        Event
+          .minimal(eventId, collectorTstamp, "0.0.0", "0.0.0")
+          .copy(event_name = Some(eventName))
+      }
+    )
+
   def badlyFormatted: IO[TokenedEvents] =
     IO.unique.map { token =>
       val serialized = Chunk("nonsense1", "nonsense2").map(s => ByteBuffer.wrap(s.getBytes(StandardCharsets.UTF_8)))

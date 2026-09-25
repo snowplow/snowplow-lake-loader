@@ -50,6 +50,7 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
     Write a single window of events into a lake table when staging batches off-heap $e12
     Preserve required struct field nullability when schema evolves within a single window, staging batches off-heap $e13
     Release the window's checkpoint blocks once the window has been committed and dropped $e14
+    Write each event's own event_name, which is the value the commit's partitioning is keyed on $e15
   """
 
   /* Only e12 and e13 use the off-heap staging path: end-to-end content, and a multi-batch union
@@ -739,10 +740,11 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
         _ <- Processing.stream(env).compile.drain
         // The loader's own session, still open inside this Resource. Reached through the
         // JVM-global default because `LakeWriter.build` does not hand back the session it creates.
-        // That global is not ours alone: `Test / parallelExecution` is unset and so defaults to
-        // true, so another spec class can hold a session in this JVM at the same time. Hence the
-        // appName assertion below - a foreign session would satisfy `checkpointed must beEmpty`
-        // trivially, and this example would go green while the RDDs it exists to catch leaked.
+        // That global is shared with every other spec in this JVM, and `getOrCreate` returns
+        // whichever session is already open, so this can reach one this example did not create.
+        // Hence the appName assertion below: a foreign session would satisfy `checkpointed must
+        // beEmpty` trivially, and this example would go green while the RDDs it exists to catch
+        // leaked.
         session <- IO.blocking(SparkSession.getDefaultSession)
         checkpointed <- IO.blocking(session.toList.flatMap(_.sparkContext.getPersistentRDDs.values).filter(_.isCheckpointed))
       } yield List[MatchResult[Any]](
@@ -752,12 +754,41 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
     }
   }
 
+  /**
+   * The CASE that places rows for the commit matches on the `event_name` column, and the histogram
+   * it is built from is keyed on `Event.event_name`. Nothing else ties those two to the same value.
+   * If they ever diverged - a transform deriving the column from somewhere else, a change of case -
+   * every row would miss every branch and the whole window would land in the one `otherwise`
+   * partition, committing on a single writer task. Nothing would fail: the counts, the gauges and
+   * the written rows would all be right, and only the commit's duration would move.
+   *
+   * Every other fixture here leaves `event_name` unset, so they exercise only the null key, which
+   * matches by `isNull` rather than by value. This is the one that carries a name end to end.
+   */
+  def e15 = Files[IO].tempDirectory.use { tmpDir =>
+    val resources = for {
+      batches <- Resource.eval(List("page_view", "page_view", "link_click").traverse(EventUtils.named))
+      tokened <- Resource.eval(batches.traverse(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened))
+    } yield env
+
+    resources.use(env => Processing.stream(env).compile.drain) >>
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking(readTable(spark, tmpDir)).map { df =>
+          import spark.implicits._
+          // Two events per batch, so four page_views and two link_clicks.
+          df.select("event_name").as[String].collect().toSeq must containTheSameElementsAs(
+            List.fill(4)("page_view") ++ List.fill(2)("link_click")
+          )
+        }
+      }
+  }
 }
 
 object AbstractSparkSpec {
 
   /** A spark session just used for making assertions, not for running the code under test */
-  private def sparkForAssertions(config: Map[String, String]): Resource[IO, SparkSession] = {
+  private[processing] def sparkForAssertions(config: Map[String, String]): Resource[IO, SparkSession] = {
     val io = IO.blocking {
       SparkSession
         .builder()

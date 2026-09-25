@@ -172,6 +172,35 @@
     # -- How many times a Spark task should be retried in case of failure.
     "taskRetries": 3
 
+    # -- How the loader spreads a window's events over the spark partitions that write to the lake.
+    # -- The aim is partitions of similar size, so no single task becomes the critical path of the
+    # -- commit, without scattering an event_name so widely that the output files get fragmented.
+    # -- The number of partitions is not configurable: it is always one fewer than the number of
+    # -- available processors, so that one spark task slot is always free for the loader to hand
+    # -- each batch over to spark while a commit is in progress.
+    "writerPartitioning": {
+
+      # -- How finely to cut a large event_name, as a fraction of a fair share: the loader aims for
+      # -- pieces of one fair share divided by this many events. Smaller pieces give it finer-grained
+      # -- items to balance the partitions with, at the cost of an output file per extra piece.
+      # -- An event_name is cut only when leaving it whole would spread the writer threads unevenly,
+      # -- so a window that already balances is not fragmented whatever this is set to.
+      "splitsPerFairShare": 4
+
+      # -- A hard floor on how small a piece of a split event_name may be. No piece ever holds
+      # -- fewer events than this, so an event_name is only ever split at all once it has at least
+      # -- twice this many events. Without it, splitting is purely relative to a fair share, which
+      # -- on a large loader receiving a slow trickle of events is only a handful of events -- such
+      # -- a window would be shredded into one small parquet file per event.
+      # -- Raise it if output files are too small; lower it if the writer threads are unbalanced.
+      # --
+      # -- Below twice this many events an event_name cannot be split, so a window of only a few
+      # -- such event_names may spread unevenly over the writer threads. That is deliberate: a
+      # -- window that small commits well within its window whatever the spread, and keeping the
+      # -- output files whole is worth more there than balancing the threads.
+      "minEventsPerSplit": 5000
+    }
+
     # -- Any valid spark configuration key/value.
     # -- This can be blank in most setups because the loader already sets sensible defaults.
     "conf": {

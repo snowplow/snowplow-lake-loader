@@ -43,7 +43,11 @@ object TestSparkEnvironment {
   ): Resource[IO, Environment[IO]] = for {
     testConfig <- Resource.pure(TestConfig.defaults(target, tmpDir, stageOffHeap))
     source = testSourceAndAck(windows)
-    lakeWriter <- LakeWriter.build[IO](testConfig.spark, testConfig.output.good, respectIgluNullability = true)
+    // Four cores, so writerParallelism is 3 and prepareFinalDataFrame repartitions. These specs are
+    // the only end-to-end coverage of materializeShuffle, the early release of the staged batches
+    // and a commit that reads from shuffle output, so they have to stay on that branch rather than
+    // inherit whatever the machine has. LakeWriterSpec e12 covers the coalescing branch.
+    lakeWriter <- LakeWriter.build[IO](testConfig.spark, testConfig.output.good, respectIgluNullability = true, cores = 4)
     lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, dummyAppHealth, retriesConfig, PartialFunction.empty)
   } yield Environment(
     appInfo = appInfo,
@@ -109,6 +113,10 @@ object TestSparkEnvironment {
     def setE2ELatency(latency: FiniteDuration): IO[Unit]        = IO.unit
     def setTableDataFilesTotal(count: Long): IO[Unit]           = IO.unit
     def setTableSnapshotsRetained(count: Long): IO[Unit]        = IO.unit
+    def setShuffleDiskBytes(bytes: Long): IO[Unit]              = IO.unit
+    def setStorageMemoryBytes(bytes: Long): IO[Unit]            = IO.unit
+    def setStorageDiskBytes(bytes: Long): IO[Unit]              = IO.unit
+    def setDiskBytes(bytes: Long): IO[Unit]                     = IO.unit
     def scrape: IO[String]                                      = IO.pure("")
     def report: Stream[IO, Nothing]                             = Stream.never[IO]
   }

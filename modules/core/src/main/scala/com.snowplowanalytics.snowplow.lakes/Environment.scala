@@ -71,7 +71,7 @@ object Environment {
       appHealth <- Resource.eval(AppHealth.init[F, Alert, RuntimeService](List(sourceReporter)))
       resolver <- mkResolver[F](config.iglu)
       httpClient <- HttpClient.resource[F](config.main.http.client)
-      metrics <- Metrics.build(config.main.monitoring.metrics, sourceAndAck)
+      metrics <- Metrics.build(config.main.monitoring.metrics, config.main.windowing, sourceAndAck)
       _ <- HealthProbe.resource(config.main.monitoring.healthProbe.port, appHealth, metrics.scrape)
       _ <- Webhook.resource(config.main.monitoring.webhook, appInfo, httpClient, appHealth)
       badSink <-
@@ -79,7 +79,12 @@ object Environment {
           .sink(config.main.output.bad.sink)
           .onError(_ => Resource.eval(appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)))
       windowing <- Resource.eval(EventProcessingConfig.TimedWindows.build(config.main.windowing, config.main.numEagerWindows))
-      lakeWriter <- LakeWriter.build(config.main.spark, config.main.output.good, config.main.respectIgluNullability)
+      lakeWriter <- LakeWriter.build(
+                      config.main.spark,
+                      config.main.output.good,
+                      config.main.respectIgluNullability,
+                      cores = Runtime.getRuntime.availableProcessors
+                    )
       destinationAndTableFormatSetupErrorCheck = destinationSetupErrorCheck.orElse(TableFormatSetupError.check(config.main.output.good))
       lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, appHealth, config.main.retries, destinationAndTableFormatSetupErrorCheck)
       cpuParallelism    = chooseCpuParallelism(config.main)

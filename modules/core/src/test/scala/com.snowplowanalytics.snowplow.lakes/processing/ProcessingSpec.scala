@@ -40,6 +40,10 @@ class ProcessingSpec extends Specification with CatsEffect {
     Decompress and load mixed plain, zstd, and gzip events $e12
     Send a corrupt zstd payload to the bad sink as a loader parsing error $e13
     Send an oversized decompressed record as a size violation and load the rest $e14
+    Not report a spark disk usage metric whose reading could not be taken $e15
+    Still release the window when reporting a spark usage metric fails $e16
+    Not report the storage gauges for a window that took no measurement $e17
+    Accumulate the window's event_name histogram across batches and hand it to the commit $e18
   """
 
   def e1 = {
@@ -57,6 +61,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 4),
+        Action.PreparedCommit("v0000000001", Map(None -> 4)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -64,6 +69,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -92,6 +101,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedBadCountMetric(2),
         Action.SentToBad(2),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -119,6 +132,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 2),
+        Action.PreparedCommit("v0000000001", Map(None -> 2)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -126,6 +140,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window1.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001"),
 
         /* window 2 */
@@ -134,6 +152,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000002", 6),
+        Action.PreparedCommit("v0000000002", Map(None -> 6)),
         Action.CommittedToTheLake("v0000000002"),
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration),
@@ -141,6 +160,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window2.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000002"),
 
         /* window 3 */
@@ -148,6 +171,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000003", 4),
+        Action.PreparedCommit("v0000000003", Map(None -> 4)),
         Action.CommittedToTheLake("v0000000003"),
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration),
@@ -155,6 +179,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(window3.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000003")
       )
     )
@@ -181,6 +209,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AppendedRowsToDataFrame("v0000000001", 2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 2),
+        Action.PreparedCommit("v0000000001", Map(None -> 6)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -188,6 +217,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -226,6 +259,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SentToBad(2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 8),
+        Action.PreparedCommit("v0000000001", Map(None -> 8)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(8),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -233,6 +267,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed((bads1 ::: goods1 ::: bads2 ::: goods2).map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -266,6 +304,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 2),
+        Action.PreparedCommit("v0000000001", Map(None -> 2)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -273,6 +312,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -308,6 +351,9 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedBadCountMetric(1),
         Action.SentToBad(1),
         Action.AppendedRowsToDataFrame("v0000000001", 1),
+        // The histogram says 2 where only 1 row was appended, because it counts parsed events and
+        // the transform then rejects one. That over-count is the approximation WindowState documents.
+        Action.PreparedCommit("v0000000001", Map(None -> 2)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(1),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -315,6 +361,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -349,6 +399,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.BecameUnhealthy(RuntimeService.Iglu),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -389,6 +443,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.BecameUnhealthy(RuntimeService.Iglu),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )).handleError { e =>
@@ -412,6 +470,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 4),
+        Action.PreparedCommit("v0000000001", Map(None -> 4)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -419,6 +478,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -440,6 +503,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedReceivedCountMetric(2),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 4),
+        Action.PreparedCommit("v0000000001", Map(None -> 4)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(4),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -447,6 +511,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -475,6 +543,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedReceivedCountMetric(1),
         Action.AddedReceivedCountMetric(1),
         Action.AppendedRowsToDataFrame("v0000000001", 6),
+        Action.PreparedCommit("v0000000001", Map(None -> 6)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(6),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -482,6 +551,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -504,6 +577,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedBadCountMetric(1),
         Action.SentToBad(1),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -529,6 +606,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.AddedBadCountMetric(1),
         Action.SentToBad(1),
         Action.AppendedRowsToDataFrame("v0000000001", 1),
+        Action.PreparedCommit("v0000000001", Map(None -> 1)),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(1),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -536,6 +614,10 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.SetTableDataFilesTotal(123L),
         Action.SetTableSnaphotsRetained(456L),
         Action.Checkpointed(tokened.map(_.ack)),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
         Action.RemovedDataFrameFromDisk("v0000000001")
       )
     )
@@ -543,4 +625,74 @@ class ProcessingSpec extends Specification with CatsEffect {
     TestControl.executeEmbed(io)
   }
 
+  // getDiskBytes is the one reading that can fail in production, and withHandledErrors turns
+  // that into a None. Rewriting Processing's `fold` as a `getOrElse(0L)` would publish a 0 that
+  // reads as plenty of free disk, and every other example would still pass.
+  def e15 = {
+    val io = for {
+      inputs <- EventUtils.inputEvents(2, EventUtils.good())
+      tokened <- inputs.traverse(_.tokened)
+      control <- MockEnvironment.build(List(tokened), diskBytes = None)
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield state should not(contain(beLike[Action] { case Action.SetDiskBytes(_) => ok }))
+
+    TestControl.executeEmbed(io)
+  }
+
+  // The reporting runs in the window's bracket finalizer, so a raising metric read must neither
+  // cost the window its blocks - hence the `guarantee` - nor kill the stream, which is what an
+  // error escaping a finalizer does. Asserts the stream's outcome as well as the release, because
+  // the release alone would still hold if the loader had exited straight afterwards.
+  def e16 = {
+    val io = for {
+      inputs <- EventUtils.inputEvents(2, EventUtils.good())
+      tokened <- inputs.traverse(_.tokened)
+      control <- MockEnvironment.build(List(tokened), sparkUsageReadFails = true)
+      outcome <- Processing.stream(control.environment).compile.drain.attempt
+      state <- control.state.get
+    } yield (outcome.isRight, state.contains(Action.RemovedDataFrameFromDisk("v0000000001"))) must beEqualTo((true, true))
+
+    TestControl.executeEmbed(io)
+  }
+  // A window that staged nothing takes no measurement, which is every idle window. Those two gauges
+  // then keep their last good reading rather than publishing a 0 that reads as an empty memory
+  // area - the same property e15 pins for the local disk figure, and the same slip available.
+  def e17 = {
+    val io = for {
+      inputs <- EventUtils.inputEvents(2, EventUtils.good())
+      tokened <- inputs.traverse(_.tokened)
+      control <- MockEnvironment.build(List(tokened), storageUsage = None)
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield state should not(contain(beLike[Action] {
+      case Action.SetStorageMemoryBytes(_) => ok
+      case Action.SetStorageDiskBytes(_)   => ok
+    }))
+
+    TestControl.executeEmbed(io)
+  }
+
+  /**
+   * Four batches in one window: three named across two distinct names, and one from `good()`, whose
+   * `Event.minimal` events have no `event_name`. Those last two are counted under `None`, so the
+   * histogram sums to the committed count rather than falling short of it.
+   */
+  def e18 = {
+    val io = for {
+      pageViews1 <- EventUtils.named("page_view")
+      pageViews2 <- EventUtils.named("page_view")
+      linkClicks <- EventUtils.named("link_click")
+      nameless <- EventUtils.good()
+      window <- List(pageViews1, pageViews2, linkClicks, nameless).traverse(_.tokened)
+      control <- MockEnvironment.build(List(window))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+      expected = Map(Some("page_view") -> 4, Some("link_click") -> 2, None -> 2)
+    } yield (state must contain(Action.PreparedCommit("v0000000001", expected))) and
+      (expected.values.sum must_== 8) and
+      (state must contain(Action.AddedCommittedCountMetric(8)))
+
+    TestControl.executeEmbed(io)
+  }
 }

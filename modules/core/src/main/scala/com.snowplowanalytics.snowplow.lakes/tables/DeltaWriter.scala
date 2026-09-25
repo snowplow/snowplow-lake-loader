@@ -18,6 +18,7 @@ import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.delta.{DeltaAnalysisException, DeltaConcurrentModificationException, DeltaLog}
+import org.apache.spark.sql.delta.actions.Protocol
 import org.apache.spark.sql.delta.util.FileNames
 import org.apache.spark.sql.delta.util.FileNames.DeltaFile
 import io.delta.tables.DeltaTable
@@ -87,6 +88,37 @@ class DeltaWriter(config: Config.Delta) extends Writer {
   }
 
   /**
+   * `update` rather than the `unsafeVolatileSnapshot` the metric getters read: a stale reading here
+   * would be a wrong answer rather than a slightly old number.
+   *
+   * Every read is inside the `blocking`, because `Snapshot.protocol` and `Snapshot.metadata`
+   * reconstruct themselves on first access - from the checksum file when there is a usable one, and
+   * otherwise from a Spark job over `_delta_log`.
+   */
+  override def describeTable[F[_]: Sync](spark: SparkSession): F[List[String]] =
+    Sync[F].blocking {
+      val snapshot = DeltaLog.forTable(spark, config.location.toString).update()
+      val protocol = snapshot.protocol
+      List(
+        s"Delta table ${config.location}: partitioned by ${snapshot.metadata.partitionColumns.mkString("[", ", ", "]")}, " +
+          s"min reader version = ${protocol.minReaderVersion}, min writer version = ${protocol.minWriterVersion}, " +
+          s"table features = ${describeTableFeatures(protocol)}",
+        s"Delta table properties: ${Writer.describeProperties(snapshot.metadata.configuration)}"
+      )
+    }
+
+  /**
+   * Above the legacy protocol versions Delta records capabilities as named features rather than as
+   * a version bump. `implicitlyAndExplicitlySupportedFeatures` rather than
+   * `readerAndWriterFeatureNames`, which holds only the named ones and so is empty for a legacy
+   * protocol - the table this reports on is often one an older loader created.
+   */
+  private def describeTableFeatures(protocol: Protocol): String = {
+    val names = protocol.implicitlyAndExplicitlySupportedFeatures.map(_.name)
+    if (names.isEmpty) "none" else names.toList.sorted.mkString("[", ", ", "]")
+  }
+
+  /**
    * Sink to delta with retries
    *
    * Retry is needed if a concurrent writer updated the table metadata. It is only needed during
@@ -125,7 +157,9 @@ class DeltaWriter(config: Config.Delta) extends Writer {
       deltaLog <- Sync[F].blocking(DeltaLog.forTable(spark, config.location.toString))
       snapshot       = deltaLog.unsafeVolatileSnapshot
       currentVersion = snapshot.version
-      // This does a directory listing (IO) but doesn't read file contents
+      // Lists the whole `_delta_log` directory without reading any file contents.
+      // `LogStore.listFrom` materializes the listing into an array and sorts it, so the directory is
+      // read in full before `collectFirst` takes an element, and the IO grows with the retained log.
       earliestVersionOpt <- Sync[F].blocking {
                               deltaLog.store
                                 .listFrom(

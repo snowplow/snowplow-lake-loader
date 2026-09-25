@@ -36,11 +36,11 @@ object Dependencies {
     val slf4j       = "2.0.18"
     val azureSdk    = "1.18.6"
     val awsSdk1     = "1.12.797"
-    val awsSdk2     = "2.54.11" // Match common-streams
+    val awsSdk2     = "2.54.18" // Match common-streams
     val awsRegistry = "1.1.27"
 
     // Snowplow
-    val streams    = "0.26.1"
+    val streams    = "0.27.0"
     val igluClient = "4.2.1"
 
     // Transitive overrides
@@ -49,10 +49,10 @@ object Dependencies {
     val log4jCore  = "2.25.5"
     val jackson    = "2.21.6"
     val micrometer = "1.16.7"
-    val netty      = "4.2.17.Final"
+    val netty      = "4.2.18.Final"
     // netty-tcnative has its own version scheme; it must match the tcnative.version pinned by
     // the netty-parent pom of V.netty, because netty-handler calls into it via JNI-bound statics.
-    val nettyTcnative = "2.0.81.Final"
+    val nettyTcnative = "2.0.84.Final"
     val bouncyCastle  = "1.85"
     val ivy           = "2.6.0"
     val reactor       = "3.8.7"
@@ -113,7 +113,6 @@ object Dependencies {
   val micrometer        = "io.micrometer"              % "micrometer-core"            % V.micrometer
   val ivy               = "org.apache.ivy"             % "ivy"                        % V.ivy
   val reactorCore       = "io.projectreactor"          % "reactor-core"               % V.reactor
-  val reactorNettyCore  = "io.projectreactor.netty"    % "reactor-netty-core"         % V.reactorNetty
   val reactorNettyHttp  = "io.projectreactor.netty"    % "reactor-netty-http"         % V.reactorNetty
 
   // Spark pulls Netty's aggregator netty-all, which has a non-optional dependency on a
@@ -228,7 +227,6 @@ object Dependencies {
     hadoopClient,
     kafkaClients % Runtime,
     reactorCore,
-    reactorNettyCore,
     reactorNettyHttp,
     specs2
   ) ++ commonRuntimeDependencies

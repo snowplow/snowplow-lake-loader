@@ -31,6 +31,13 @@ import java.time.Instant
  *   Names of the columns which will be written out by the loader
  * @param numEvents
  *   The number of events in this window
+ * @param eventNameCounts
+ *   How many events of each `event_name` this window has seen, keyed by the column's value, so
+ *   `None` counts the events that have none. Spreads the commit evenly over the writer's
+ *   partitions; see `WriterPartitioner`. Events that fail to transform are counted anyway, so this
+ *   is an approximation. Scattered failures cost nothing, but a whole `event_name` failing - one
+ *   schema that stops resolving - reserves partitions for rows that never arrive, and the commit
+ *   loses that share of its parallelism with every gauge reading healthy.
  * @param earliestCollectorTstamp
  *   The earliest collector_tstamp of all events seen in the window
  * @param id
@@ -42,6 +49,7 @@ private[processing] case class WindowState(
   startTime: Instant,
   nonAtomicColumnNames: Set[String],
   numEvents: Int,
+  eventNameCounts: Map[Option[String], Int],
   earliestCollectorTstamp: Option[Instant],
   id: Int
 ) {
@@ -58,7 +66,7 @@ private[processing] object WindowState {
       for {
         now <- Sync[F].realTimeInstant
         i <- counter.updateAndGet(_ + 1)
-      } yield WindowState(Nil, now, Set.empty, 0, None, i)
+      } yield WindowState(Nil, now, Set.empty, 0, Map.empty, None, i)
   }
 
   def factory[F[_]: Sync]: F[Factory[F]] =

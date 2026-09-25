@@ -14,6 +14,7 @@ import cats.implicits._
 import cats.data.NonEmptyList
 import cats.{Applicative, Foldable}
 import cats.effect.{Async, Deferred, Sync}
+import cats.effect.implicits._
 import cats.effect.kernel.{Ref, Unique}
 import fs2.{Pipe, Stream}
 import io.circe.syntax._
@@ -121,11 +122,47 @@ object Processing {
    * Manages the lifecycle of initializing and cleaning a Spark DataFrame scoped to the lifetime of
    * the window
    */
-  private def manageDataFrame[F[_]](env: Environment[F], viewName: String): Stream[F, Unit] = {
+  private def manageDataFrame[F[_]: Sync](env: Environment[F], viewName: String): Stream[F, Unit] = {
     val init = env.lakeWriter.initializeLocalDataFrame(viewName)
-    val drop = env.lakeWriter.removeDataFrameFromDisk(viewName)
+    // Guaranteed, so a failure reporting a metric cannot skip the release and leak the window.
+    val drop = reportSparkUsage(env, viewName).guarantee(env.lakeWriter.removeDataFrameFromDisk(viewName))
     Stream.bracket(init)(_ => drop)
   }
+
+  /**
+   * Reports what Spark is holding for the window that is ending.
+   *
+   * In the bracket's finalizer, so it runs for every window whatever became of it, including one
+   * that yielded no events and one whose commit failed. A `commit` still retrying is the case it
+   * does not reach, and there the loader's health and latency metrics are what carry the failure.
+   *
+   * Must precede the release, which is what makes it the fullest point: the window's shuffle files
+   * are still on disk, and with no shuffle its staged batches are still held. That is also what it
+   * costs - both readings block, so the window holds what it holds for their duration, and with no
+   * shuffle what they delay is the release of the staged batches themselves. The RPC's timeout and
+   * the walk's O(files) cost are on `SnowplowInternalSparkBridge.blockManagerUsage` and
+   * `localDiskBytes`; both grow with the conditions these gauges exist to detect.
+   *
+   * Where a window had a shuffle, `getStorageUsage` describes the moment `prepareCommit` measured
+   * rather than this one, so it lags by that window's commit.
+   */
+  private def reportSparkUsage[F[_]: Sync](env: Environment[F], viewName: String): F[Unit] =
+    (for {
+      _ <- env.lakeWriter.recordBlockManagerPeak(viewName)
+      storageUsage <- env.lakeWriter.getStorageUsage(viewName)
+      _ <- storageUsage.traverse_ { usage =>
+             env.metrics.setStorageMemoryBytes(usage.memoryBytes) *> env.metrics.setStorageDiskBytes(usage.diskBytes)
+           }
+      shuffleDiskBytes <- env.lakeWriter.getShuffleDiskBytes
+      _ <- env.metrics.setShuffleDiskBytes(shuffleDiskBytes)
+      diskBytes <- env.lakeWriter.getDiskBytes
+      _ <- diskBytes.fold(Sync[F].unit)(env.metrics.setDiskBytes)
+    } yield ()).handleErrorWith { e =>
+      // An error escaping a bracket finalizer fails the stream, so without this the loader would
+      // restart over a metric. Nothing here can raise today, but that rests on which accessors
+      // happen not to touch Spark rather than on anything structural.
+      Logger[F].warn(e)("Could not report Spark's disk and memory usage for this window")
+    }
 
   private def processBatches[F[_]: Async: RegistryLookup](
     env: Environment[F],
@@ -152,9 +189,14 @@ object Processing {
         _ <- rememberColumnNames(ref, nonAtomicFields.fields)
         (bad, rows) <- transformToSpark[F](badProcessor, events, nonAtomicFields)
         _ <- sendFailedEvents(env, badProcessor, bad)
+        batchEventNameCounts <- Sync[F].delay(countEventNames(events))
         windowState <- ref.updateAndGet { s =>
                          val updatedCollectorTstamp = chooseEarliestTstamp(earliestCollectorTstamp, s.earliestCollectorTstamp)
-                         s.copy(numEvents = s.numEvents + rows.size, earliestCollectorTstamp = updatedCollectorTstamp)
+                         s.copy(
+                           numEvents               = s.numEvents + rows.size,
+                           eventNameCounts         = s.eventNameCounts |+| batchEventNameCounts,
+                           earliestCollectorTstamp = updatedCollectorTstamp
+                         )
                        }
         _ <- sinkTransformedBatch(env, windowState, rows, SparkSchema.forBatch(nonAtomicFields.fields, env.respectIgluNullability))
       } yield ()
@@ -174,6 +216,22 @@ object Processing {
         } yield ()
       case None =>
         Logger[F].debug(s"An in-memory batch yielded zero good events.  Nothing will be saved to local disk.")
+    }
+
+  /**
+   * The event-name histogram for one batch, which the window accumulates and the writer uses to
+   * balance the commit across partitions. See `WriterPartitioner`.
+   *
+   * Counted from the parsed events rather than from the transformed rows, because the transform
+   * discards the association between a row and its event. That over-counts by the number of events
+   * which failed to transform, which is immaterial to load balancing.
+   *
+   * A missing `event_name` is counted under `None`, because it is a value in the column and
+   * `WriterPartitioner` sizes and splits it like any other key.
+   */
+  private def countEventNames(events: ListOfList[Event]): Map[Option[String], Int] =
+    Foldable[ListOfList].foldLeft(events, Map.empty[Option[String], Int]) { case (acc, event) =>
+      acc.updated(event.event_name, acc.getOrElse(event.event_name, 0) + 1)
     }
 
   private def rememberTokens[F[_]: Applicative](
@@ -275,6 +333,7 @@ object Processing {
         for {
           _ <- Logger[F].info(s"Window ${state.viewName} ready to write and commit ${state.numEvents} events to the lake.")
           _ <- Logger[F].info(s"Non atomic columns: [${state.nonAtomicColumnNames.toSeq.sorted.mkString(",")}]")
+          _ <- env.lakeWriter.prepareCommit(state.viewName, state.eventNameCounts)
           _ <- env.lakeWriter.commit(state.viewName)
           now <- Sync[F].realTime
           _ <- Logger[F].info(s"Window ${state.viewName} finished writing and committing ${state.numEvents} events to the lake.")
