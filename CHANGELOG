@@ -1,3 +1,13 @@
+Version 0.13.0 (2026-09-07)
+---------------------------
+Open jdk.internal.ref so off-heap blocks bypass the direct buffer pool (#78)
+Stop sorting the DataFrame before writing to Iceberg (#77)
+Bump dependencies for 0.13.0 release (#76)
+Release a window's checkpoint blocks when the window is dropped (#74)
+Stage window batches in off-heap memory when a pool is configured (#73)
+Encode batches to InternalRow outside the append mutex (#70)
+Point the rollout job summary at #pipeline-rollouts (#69)
+
 Version 0.12.0 (2026-08-04)
 ---------------------------
 Bump dependencies to fix CVEs (#64)

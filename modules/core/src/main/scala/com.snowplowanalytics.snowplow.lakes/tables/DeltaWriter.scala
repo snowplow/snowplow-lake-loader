@@ -138,6 +138,4 @@ class DeltaWriter(config: Config.Delta) extends Writer {
                 currentVersion - earliestVersion + 1
               }
     } yield count
-
-  override def expectsSortedDataframe: Boolean = false
 }

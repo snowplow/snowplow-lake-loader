@@ -38,9 +38,10 @@ object TestSparkEnvironment {
     target: TestConfig.Target,
     tmpDir: Path,
     windows: List[List[TokenedEvents]],
-    inMemBatchBytes: Long = 1000000L
+    inMemBatchBytes: Long = 1000000L,
+    stageOffHeap: Boolean = false
   ): Resource[IO, Environment[IO]] = for {
-    testConfig <- Resource.pure(TestConfig.defaults(target, tmpDir))
+    testConfig <- Resource.pure(TestConfig.defaults(target, tmpDir, stageOffHeap))
     source = testSourceAndAck(windows)
     lakeWriter <- LakeWriter.build[IO](testConfig.spark, testConfig.output.good, respectIgluNullability = true)
     lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, dummyAppHealth, retriesConfig, PartialFunction.empty)

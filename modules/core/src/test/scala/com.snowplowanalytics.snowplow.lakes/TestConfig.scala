@@ -23,20 +23,28 @@ object TestConfig {
   case object Iceberg extends Target
 
   /** Provides an app Config using defaults provided by our standard reference.conf */
-  def defaults(target: Target, tmpDir: Path): AnyConfig =
+  def defaults(
+    target: Target,
+    tmpDir: Path,
+    stageOffHeap: Boolean = false
+  ): AnyConfig =
     ConfigFactory
-      .load(ConfigFactory.parseString(configOverrides(target, tmpDir)))
+      .load(ConfigFactory.parseString(configOverrides(target, tmpDir, stageOffHeap)))
       .as[Config[Option[Unit], Json, Json]] match {
       case Right(ok) => ok
       case Left(e)   => throw new RuntimeException("Could not load default config for testing", e)
     }
 
-  private def configOverrides(target: TestConfig.Target, tmpDir: Path): String = {
+  private def configOverrides(
+    target: TestConfig.Target,
+    tmpDir: Path,
+    stageOffHeap: Boolean
+  ): String = {
     val location = (tmpDir / "events").toNioPath.toUri
     target match {
       case Delta =>
         s"""
-        $commonRequiredConfig
+        ${commonRequiredConfig(stageOffHeap)}
         output.good: {
           type: "Delta"
           location: "$location"
@@ -44,7 +52,7 @@ object TestConfig {
         """
       case Iceberg =>
         s"""
-        $commonRequiredConfig
+        ${commonRequiredConfig(stageOffHeap)}
         output.good: {
           type: "Iceberg"
           database: "test"
@@ -58,8 +66,8 @@ object TestConfig {
     }
   }
 
-  private def commonRequiredConfig: String =
-    """
+  private def commonRequiredConfig(stageOffHeap: Boolean): String =
+    s"""
     license: {
       accept: true
     }
@@ -67,6 +75,25 @@ object TestConfig {
     input: {}
     output.bad: {
       maxRecordSize: 10000
+    }
+    ${if (stageOffHeap) offHeapPool else ""}
+    """
+
+  /**
+   * A configured pool is what makes `LakeWriter` stage window batches off-heap, so this is how a
+   * spec picks that path. Off by default, because reference.conf ships no pool: unless a spec says
+   * otherwise it should exercise what customers actually run.
+   *
+   * Deliberately no `spark.memory.storageFraction` here. reference.conf sets it to "0" and HOCON
+   * merges this on top, so specs run with the production split - no guaranteed off-heap storage
+   * region, staged blocks borrowing from the execution pool. That they pass is the evidence that
+   * borrowing works, which is the non-obvious half of `SparkUtils.stageBatchesOffHeap`.
+   */
+  private def offHeapPool: String =
+    """
+    spark.conf: {
+      "spark.memory.offHeap.enabled": "true"
+      "spark.memory.offHeap.size": "268435456"
     }
     """
 

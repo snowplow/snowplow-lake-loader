@@ -118,10 +118,4 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
     val snapshotsTable = s"${fqTable}.snapshots"
     Sync[F].blocking(Some(spark.table(snapshotsTable).count()))
   }
-
-  /**
-   * Iceberg writer requires the Dataframe to be sorted, because we set the iceberg write option
-   * `distribution-mode = none`
-   */
-  override def expectsSortedDataframe: Boolean = true
 }

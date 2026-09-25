@@ -34,6 +34,10 @@ object BuildSettings {
     "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED", // Needed by Kryo serializer
     "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED", // Needed by Kryo serializer
     "--add-opens=java.base/java.nio=ALL-UNNAMED",
+    // With java.nio above, lets Spark's Platform allocate off-heap blocks through Unsafe. Without
+    // it Platform falls back to ByteBuffer.allocateDirect, which counts the pool against
+    // -XX:MaxDirectMemorySize and calls System.gc() when it runs short.
+    "--add-opens=java.base/jdk.internal.ref=ALL-UNNAMED",
     "--add-opens=java.base/java.util=ALL-UNNAMED", // Needed by Kryo for collections
     "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED", // Critical for Spark StorageUtils
     "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",

@@ -47,7 +47,16 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
     Preserve context array element field nullability and data values when context schema evolves within a single window $e9
     Preserve required nested struct field nullability when schema evolves within a single window $e10
     Keep a nested field nullable when it was nullable in an earlier batch even if the current batch schema marks it required $e11
+    Write a single window of events into a lake table when staging batches off-heap $e12
+    Preserve required struct field nullability when schema evolves within a single window, staging batches off-heap $e13
+    Release the window's checkpoint blocks once the window has been committed and dropped $e14
   """
+
+  /* Only e12 and e13 use the off-heap staging path: end-to-end content, and a multi-batch union
+   * with an evolving schema, being the two cases that depend on how a batch is staged. Every other
+   * example runs the heap path that reference.conf ships, and covers column naming and
+   * schema-recovery logic the staging path cannot affect, so a second Spark session each would buy
+   * nothing. */
 
   /* Abstract definitions */
 
@@ -68,11 +77,15 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
 
   /* The specs */
 
-  def e1 = Files[IO].tempDirectory.use { tmpDir =>
+  def e1 = writeSingleWindow(stageOffHeap = false)
+
+  def e12 = writeSingleWindow(stageOffHeap = true)
+
+  private def writeSingleWindow(stageOffHeap: Boolean) = Files[IO].tempDirectory.use { tmpDir =>
     val resources = for {
       inputs <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good()))
       tokened <- Resource.eval(inputs.traverse(_.tokened))
-      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened), stageOffHeap = stageOffHeap)
     } yield (inputs, env)
 
     val result = resources.use { case (inputEvents, env) =>
@@ -388,7 +401,11 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
   // Spark's unionByName incorrectly promotes inner struct fields to nullable
   // when merging DataFrames with different nested struct schemas
   // (e.g. when a new Iglu patch-version adds a sub-field within a single processing window).
-  def e8 = Files[IO].tempDirectory.use { tmpDir =>
+  def e8 = preserveNullabilityAcrossBatches(stageOffHeap = false)
+
+  def e13 = preserveNullabilityAcrossBatches(stageOffHeap = true)
+
+  private def preserveNullabilityAcrossBatches(stageOffHeap: Boolean) = Files[IO].tempDirectory.use { tmpDir =>
     val ueGood700 = SnowplowEvent.UnstructEvent(
       Some(
         SelfDescribingData(
@@ -419,7 +436,7 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
       tokened2 <- Resource.eval(inputs2.traverse(_.tokened))
       // inMemBatchBytes=1 forces each TokenedEvents to become its own Batched, giving separate
       // localAppendRows calls with different inner struct schemas within the same window.
-      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened1 ++ tokened2), inMemBatchBytes = 1L)
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened1 ++ tokened2), inMemBatchBytes = 1L, stageOffHeap = stageOffHeap)
     } yield env
 
     val io = resources.use { env =>
@@ -690,6 +707,48 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
           ).reduce(_ and _)
         }
       }
+    }
+  }
+
+  // `SparkUtilsSpec` covers `SparkUtils.dropView` in isolation. This covers the wiring around it:
+  // that `LakeWriter` accumulates each batch's RDD under the window's view name and hands the whole
+  // list over when `Processing.manageDataFrame` closes its bracket. Runs against the session config
+  // the loader actually uses.
+  //
+  // On the heap staging path only, like the rest of the examples here. The release is the same
+  // `unpersistRDD` either way, and `SparkUtilsSpec` covers both levels, so an off-heap variant
+  // would cost a second Spark session to assert the same bookkeeping.
+  //
+  // `unpersistRDD` removes the RDD from `persistentRdds` synchronously even though the block
+  // eviction it triggers is asynchronous, so this is deterministic - but it asserts the bookkeeping
+  // rather than that the bytes have left `spark.local.dir`.
+  //
+  // Filtered to checkpointed RDDs rather than asserting the map is empty, because Delta caches its
+  // own table state ("Delta Table State #1 - <path>/_delta_log") for the life of the session. Ours
+  // are the only ones this loader checkpoints, so `isCheckpointed` picks out exactly the RDDs this
+  // change is responsible for.
+  def e14 = Files[IO].tempDirectory.use { tmpDir =>
+    val resources = for {
+      inputs <- Resource.eval(EventUtils.inputEvents(2, EventUtils.good()))
+      tokened <- Resource.eval(inputs.traverse(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(tokened))
+    } yield env
+
+    resources.use { env =>
+      for {
+        _ <- Processing.stream(env).compile.drain
+        // The loader's own session, still open inside this Resource. Reached through the
+        // JVM-global default because `LakeWriter.build` does not hand back the session it creates.
+        // That global is not ours alone: `Test / parallelExecution` is unset and so defaults to
+        // true, so another spec class can hold a session in this JVM at the same time. Hence the
+        // appName assertion below - a foreign session would satisfy `checkpointed must beEmpty`
+        // trivially, and this example would go green while the RDDs it exists to catch leaked.
+        session <- IO.blocking(SparkSession.getDefaultSession)
+        checkpointed <- IO.blocking(session.toList.flatMap(_.sparkContext.getPersistentRDDs.values).filter(_.isCheckpointed))
+      } yield List[MatchResult[Any]](
+        session.map(_.sparkContext.appName) must beSome("snowplow-lake-loader"),
+        checkpointed must beEmpty
+      ).reduce(_ and _)
     }
   }
 

@@ -13,11 +13,14 @@ package com.snowplowanalytics.snowplow.lakes.processing
 import cats.data.NonEmptyList
 import cats.effect.{Async, Sync}
 import cats.effect.kernel.Resource
+import cats.effect.implicits._
 import cats.implicits._
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SnowplowInternalSparkBridge, SparkSession}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.functions.{col, current_timestamp}
 import org.apache.spark.sql.types.{ArrayType, DataType, StructType}
 
@@ -65,6 +68,41 @@ private[processing] object SparkUtils {
   private def sparkConfigOptions(config: Config.Spark, writer: Writer): Map[String, String] =
     writer.sparkConfig ++ config.conf
 
+  /**
+   * Whether to stage window batches in off-heap memory instead of on the JVM heap.
+   *
+   * Off-heap keeps a window's worth of staged events out of the garbage collector's way, but the
+   * pool is sized separately from the heap and comes out of the same container memory limit, so it
+   * is opt-in. Without a pool, `StorageLevel.OFF_HEAP` blocks would find no off-heap memory to
+   * acquire and every staged block would go straight to disk, which on the deployments this targets
+   * is already the bottleneck.
+   *
+   * Note that a pool is not a guarantee of residency: `spark.memory.storageFraction` is "0" in
+   * reference.conf, so staged blocks own none of the pool. They borrow from the execution region
+   * and are evicted back to disk whenever execution reclaims it. That is the trade we want -
+   * starving execution fails a task, whereas an evicted block costs one write and one read and is
+   * still off the heap, so it keeps the GC benefit that is the point of staging off-heap at all.
+   * Some spilling under load is expected here, not a sign of misconfiguration.
+   *
+   * When sizing the pool, note that `spark.memory.offHeap.enabled` also puts Tungsten *execution*
+   * memory off-heap, so the pool has to cover the commit job's shuffle as well as the staged
+   * window. The pool is native memory allocated through `Unsafe`, outside every JVM budget - see
+   * the `jdk.internal.ref` flag in `BuildSettings.javaModuleFlags`, without which it would count
+   * against `-XX:MaxDirectMemorySize` instead.
+   *
+   * Decided once, because a `SparkConf` is fixed when the context is created. The choice is
+   * otherwise invisible, hence the log line.
+   */
+  def stageBatchesOffHeap[F[_]: Sync](spark: SparkSession): F[Boolean] = {
+    val enabled = spark.sparkContext.getConf.getBoolean("spark.memory.offHeap.enabled", false)
+    val log =
+      if (enabled)
+        Logger[F].info("Staging window batches in off-heap memory")
+      else
+        Logger[F].info("Staging window batches on the JVM heap; set spark.memory.offHeap.enabled and .size to stage off-heap")
+    log.as(enabled)
+  }
+
   def initializeLocalDataFrame[F[_]: Sync](spark: SparkSession, viewName: String): F[Unit] =
     for {
       _ <- Logger[F].debug(s"Initializing local DataFrame with name $viewName")
@@ -77,26 +115,115 @@ private[processing] object SparkUtils {
            }
     } yield ()
 
-  def localAppendRows[F[_]: Sync](
+  /**
+   * Converts a batch of rows into Spark's internal representation.
+   *
+   * Expensive, and deliberately separate from [[appendStagedBatch]] so that the caller can run it
+   * outside the mutex that serializes appends. `LakeWriter` does exactly that, for this and for
+   * [[stageBatch]]; only the view read-modify-write is left under the mutex.
+   *
+   * Encoding here rather than letting Spark do it inside the job matters for more than parallelism.
+   * `createDataFrame(rdd: RDD[Row], schema)` leaves the batch as `Row` objects in the RDD, so the
+   * task that Spark builds for the checkpoint job carries the whole batch as a graph of boxed
+   * objects. That graph is Kryo-serialized on Spark's task-scheduler thread, inside
+   * `TaskSchedulerImpl.resourceOffers`, which is synchronized and shared with every other job in
+   * the session - so the cost lands on a single-threaded path that also gates the window commit.
+   * `UnsafeRow` implements `KryoSerializable` and writes its backing buffer directly, so
+   * pre-encoding turns that object walk into a byte copy.
+   *
+   * Note this does not reduce total CPU per event, and slightly increases it: `RDDScanExec` applies
+   * an `UnsafeProjection` to whatever its RDD yields, so the pre-encoded rows are projected again
+   * on the executor regardless. The win is entirely that the expensive half now runs in parallel
+   * and off the single-threaded scheduler path, so do not "optimise" it away by encoding inside the
+   * job again.
+   */
+  def encodeBatch[F[_]: Sync](
+    spark: SparkSession,
+    rows: NonEmptyList[Row],
+    igluSchema: StructType
+  ): F[NonEmptyList[InternalRow]] =
+    Sync[F].delay(SnowplowInternalSparkBridge.rowEncoder(spark, igluSchema)).flatMap { toInternalRow =>
+      // The encoder reuses one output row, so each result must be copied before the next call.
+      // Wrapping each row in a delay lets the Cats Effect runtime cede between rows, as elsewhere
+      // in the transform path.
+      rows.traverse(row => Sync[F].delay(toInternalRow(row).copy()))
+    }
+
+  /**
+   * One batch staged as a checkpointed DataFrame, together with the RDD holding its blocks.
+   *
+   * The two travel together because the caller needs both and they come from the same checkpoint:
+   * [[appendStagedBatch]] unions `df` onto the accumulated view, while `checkpointed` is what
+   * `LakeWriter` accumulates for the window so [[dropView]] can release the blocks when the window
+   * is committed.
+   */
+  final case class StagedBatch(df: DataFrame, checkpointed: RDD[InternalRow])
+
+  /**
+   * Stages one batch as a checkpointed DataFrame, truncating its lineage.
+   *
+   * The checkpoint is not optional: it replaces the RDD's dependencies, making the
+   * `ParallelCollectionRDD` that holds this batch's rows unreachable so it can be collected. A bare
+   * `persist` would leave every batch of the window pinned for the whole window.
+   *
+   * This runs a Spark job, and like [[encodeBatch]] it deliberately sits outside the mutex that
+   * serializes appends: the staged DataFrame is a pure function of the batch and never reads or
+   * writes the accumulated view, so it cannot participate in the read-modify-write race the mutex
+   * exists to prevent. Keeping it out matters because the block write - serializing and, for
+   * off-heap, compressing every row - happens on an executor thread, so batches stage across cores
+   * instead of one at a time. Do not fold this back into [[appendStagedBatch]].
+   *
+   * The storage level for each choice is picked inside `checkpointedDataFrame`, where the reason
+   * both must keep a disk fallback is written down.
+   */
+  def stageBatch[F[_]: Sync](
+    spark: SparkSession,
+    rows: NonEmptyList[InternalRow],
+    igluSchema: StructType,
+    stageOffHeap: Boolean
+  ): F[StagedBatch] =
+    for {
+      _ <- Logger[F].debug(s"Staging batch of ${rows.size} events")
+      staged <- Sync[F].blocking {
+                  // The pool is a thread-local read when the job is submitted, so it has to be set
+                  // on this thread rather than inherited from the append that follows.
+                  try {
+                    spark.sparkContext.setLocalProperty("spark.scheduler.pool", "pool1")
+                    // Stage each batch as one partition. Note this must not be `coalesce(1)`, which would
+                    // label the plan `SinglePartition`; Spark 4.1's UnionExec then zips the accumulated
+                    // batches into one partition instead of concatenating them. See spark.sql.unionOutputPartitioning.
+                    val batchRdd = spark.sparkContext.parallelize(rows.toList, 1)
+                    val (df, checkpointed) =
+                      SnowplowInternalSparkBridge.checkpointedDataFrame(spark, batchRdd, igluSchema, offHeap = stageOffHeap)
+                    StagedBatch(df, checkpointed)
+                  } finally
+                    spark.sparkContext.setLocalProperty("spark.scheduler.pool", null)
+                }
+    } yield staged
+
+  /**
+   * Appends an already-staged batch to the local DataFrame we are accumulating for this window.
+   *
+   * Callers must hold the append mutex: this reads the named view, unions onto it, and re-saves it
+   * under the same name, so two concurrent calls would each union onto the same snapshot and one
+   * batch of events would be lost. Everything expensive happened in [[encodeBatch]] and
+   * [[stageBatch]] before the mutex was taken; what is left is metadata.
+   */
+  def appendStagedBatch[F[_]: Sync](
     spark: SparkSession,
     viewName: String,
-    rows: NonEmptyList[Row],
+    staged: DataFrame,
     igluSchema: StructType,
     shouldRestoreNullability: Boolean
   ): F[Unit] =
     for {
-      _ <- Logger[F].debug(s"Saving batch of ${rows.size} events to local DataFrame $viewName")
+      _ <- Logger[F].debug(s"Appending a staged batch to local DataFrame $viewName")
       _ <- Sync[F].blocking {
              try {
                spark.sparkContext.setLocalProperty("spark.scheduler.pool", "pool1")
                val accumulatedSchema = spark.table(viewName).schema
-               // Stage each batch as one partition.
-               val batchRdd = spark.sparkContext.parallelize(rows.toList, 1)
-               val united = spark
-                 .createDataFrame(batchRdd, igluSchema)
-                 .localCheckpoint()
-                 .unionByName(spark.table(viewName), allowMissingColumns = true)
-               val result = if (shouldRestoreNullability) restoreNullability(igluSchema, accumulatedSchema, united) else united
+               val united            = staged.unionByName(spark.table(viewName), allowMissingColumns = true)
+               val result            = if (shouldRestoreNullability) restoreNullability(igluSchema, accumulatedSchema, united) else united
                result.createOrReplaceTempView(viewName)
              } finally
                spark.sparkContext.setLocalProperty("spark.scheduler.pool", null)
@@ -106,8 +233,7 @@ private[processing] object SparkUtils {
   def prepareFinalDataFrame[F[_]: Sync](
     spark: SparkSession,
     viewName: String,
-    writerParallelism: Int,
-    writerExpectsSortedDataframe: Boolean
+    writerParallelism: Int
   ): F[DataFrame] =
     for {
       df <- Sync[F].pure(spark.table(viewName))
@@ -116,7 +242,6 @@ private[processing] object SparkUtils {
               // This maximizes output file sizes, for a lake which is partitioned by event_name.
               if (writerParallelism > 1) df.repartitionByRange(writerParallelism, col("event_name"), col("event_id")) else df.coalesce(1)
             }
-      df <- Sync[F].pure(if (writerExpectsSortedDataframe) df.sortWithinPartitions("event_name") else df)
     } yield df.withColumn("load_tstamp", current_timestamp())
 
   // Spark's unionByName can incorrectly promote inner StructType fields to nullable when the two
@@ -207,13 +332,60 @@ private[processing] object SparkUtils {
     })
   }
 
-  def dropView[F[_]: Sync](spark: SparkSession, viewName: String): F[Unit] =
-    Logger[F].info(s"Removing Spark data frame $viewName from local disk...") >>
-      Sync[F].blocking {
-        try {
-          spark.sparkContext.setLocalProperty("spark.scheduler.pool", "pool1")
-          spark.catalog.dropTempView(viewName)
-        } finally
-          spark.sparkContext.setLocalProperty("spark.scheduler.pool", null)
-      }.void
+  /**
+   * Removes the window's view and releases the checkpoint blocks it accumulated.
+   *
+   * Dropping the view only removes the catalog entry. The blocks staged by [[stageBatch]] are held
+   * by the block manager until Spark's `ContextCleaner` unpersists them, and it only does that once
+   * the RDD has been garbage collected - these RDDs survive a whole window, so they are promoted to
+   * the old generation and wait for a full GC. Spark's own backstop for that is a scheduled
+   * `System.gc()` every `spark.cleaner.periodicGC.interval`, which defaults to 30 minutes. In the
+   * meantime the blocks sit in the storage pool, and once that is full they spill to
+   * `spark.local.dir` - the same filesystem the window commit shuffles to.
+   *
+   * That backstop is weaker still on the off-heap path, which is the one this matters most for.
+   * Off-heap blocks are not on the JVM heap, so filling the pool provokes no GC of its own; the
+   * only thing that collects the RDDs holding them is a GC driven by heap pressure or by Spark's
+   * periodic `System.gc()` - and staging off-heap exists precisely to take that pressure off the
+   * heap.
+   *
+   * We know exactly when this data is dead, so release it here rather than waiting to be collected.
+   */
+  def dropView[F[_]: Sync](
+    spark: SparkSession,
+    viewName: String,
+    checkpointed: List[RDD[InternalRow]]
+  ): F[Unit] =
+    Logger[F].info(s"Removing Spark data frame $viewName...") >>
+      Sync[F]
+        .blocking {
+          try {
+            spark.sparkContext.setLocalProperty("spark.scheduler.pool", "pool1")
+            val _ = spark.catalog.dropTempView(viewName)
+          } finally
+            spark.sparkContext.setLocalProperty("spark.scheduler.pool", null)
+        }
+        // Guaranteed, so that a failure to drop the view cannot skip the release: `LakeWriter` has
+        // already dropped its own reference to these RDDs, so this is the only chance to release
+        // them deterministically. Dropping first is still the right order - the catalog entry is
+        // what holds the strong references, and the plan is unreadable once the blocks are gone.
+        .guarantee(checkpointed.traverse_(releaseBlocks[F]))
+
+  /**
+   * Releases one batch's checkpoint blocks, logging rather than raising if it fails.
+   *
+   * Every RDD has to be attempted, so this must not propagate: nothing records these RDDs any more,
+   * so a failure that escaped would skip the ones behind it and leak them. Nor is it worth failing
+   * the window over, since Spark's `ContextCleaner` is still the backstop - failing to release
+   * leaves us exactly where we were before this existed.
+   *
+   * No scheduler pool, unlike the rest of this file: `unpersistRDD` is a message to the block
+   * manager and submits no job.
+   */
+  private def releaseBlocks[F[_]: Sync](rdd: RDD[InternalRow]): F[Unit] =
+    Sync[F]
+      .blocking(SnowplowInternalSparkBridge.releaseCheckpointBlocks(rdd))
+      .handleErrorWith { e =>
+        Logger[F].warn(e)(s"Could not release the cached blocks of RDD ${rdd.id}. Leaving them to Spark's ContextCleaner.")
+      }
 }

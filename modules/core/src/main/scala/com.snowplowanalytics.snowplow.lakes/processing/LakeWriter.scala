@@ -14,9 +14,11 @@ import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import cats.implicits._
 import cats.data.NonEmptyList
-import cats.effect.{Async, Resource, Sync}
+import cats.effect.{Async, Ref, Resource, Sync}
 import cats.effect.std.Mutex
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 
 import com.snowplowanalytics.snowplow.runtime.{AppHealth, Retrying}
@@ -38,8 +40,9 @@ trait LakeWriter[F[_]] {
   /**
    * Append rows to the local DataFrame we are accumulating for this window
    *
-   * This is a lazy operation: The resulting union-ed DataFrame is not evaluated until the end of
-   * the window when we commit to the lake.
+   * The batch is encoded and checkpointed eagerly, so this runs work per call. It is only the union
+   * with the accumulated view that stays lazy, and that is evaluated at the end of the window when
+   * we commit to the lake.
    *
    * @param viewName
    *   Spark view for this window. The view should already be initialized before calling
@@ -94,10 +97,12 @@ object LakeWriter {
     val shouldRestoreNullability = respectIgluNullability && !target.isInstanceOf[Config.Delta]
     for {
       session <- SparkUtils.session[F](config, w, target)
+      stageOffHeap <- Resource.eval(SparkUtils.stageBatchesOffHeap[F](session))
       writerParallelism = chooseWriterParallelism()
       mutex1 <- Resource.eval(Mutex[F])
       mutex2 <- Resource.eval(Mutex[F])
-    } yield impl(session, w, writerParallelism, shouldRestoreNullability, mutex1, mutex2)
+      checkpointed <- Resource.eval(Ref[F].of(Map.empty[String, List[RDD[InternalRow]]]))
+    } yield impl(session, w, writerParallelism, shouldRestoreNullability, stageOffHeap, mutex1, mutex2, checkpointed)
   }
 
   def withHandledErrors[F[_]: Async](
@@ -161,17 +166,29 @@ object LakeWriter {
    *   This mutex is needed because we allow overlapping windows. It prevents two different windows
    *   from trying to run the same expensive operation at the same time
    * @param mutexForLocalAppending
-   *   This mutex is needed because `SparkUtils.localAppendRows` would otherwise have a race
+   *   This mutex is needed because `SparkUtils.appendStagedBatch` would otherwise have a race
    *   condition: It fetches a saved dataframe by name, modifies it, and re-saves the dataframe by
-   *   the same name.
+   *   the same name. It deliberately covers neither `SparkUtils.encodeBatch` nor
+   *   `SparkUtils.stageBatch`, which are the expensive steps and never touch the named view.
+   * @param checkpointedRdds
+   *   The checkpoint blocks accumulated by each open window, so they can be released as soon as the
+   *   window is dropped rather than whenever Spark's `ContextCleaner` next gets to them. Keyed by
+   *   view name, and the entry is removed when the window ends. What keeps this map bounded is that
+   *   `Processing.manageDataFrame` brackets each window, so `removeDataFrameFromDisk` always runs,
+   *   and that fs2 joins the `parEvalMapUnordered` fibers before running that finalizer, so no
+   *   append can add an entry back after its window removed one. An entry that outlived its window
+   *   would hold a strong reference to its RDDs for the life of the app, defeating the
+   *   ContextCleaner as well, which is worse than not tracking them at all.
    */
   private def impl[F[_]: Sync](
     spark: SparkSession,
     w: Writer,
     writerParallelism: Int,
     shouldRestoreNullability: Boolean,
+    stageOffHeap: Boolean,
     mutexForRemoteWriting: Mutex[F],
-    mutexForLocalAppending: Mutex[F]
+    mutexForLocalAppending: Mutex[F],
+    checkpointedRdds: Ref[F, Map[String, List[RDD[InternalRow]]]]
   ): LakeWriter[F] = new LakeWriter[F] {
     def createTable: F[Unit] =
       w.prepareTable(spark)
@@ -184,16 +201,32 @@ object LakeWriter {
       rows: NonEmptyList[Row],
       schema: StructType
     ): F[Unit] =
-      mutexForLocalAppending.lock.surround {
-        SparkUtils.localAppendRows(spark, viewName, rows, schema, shouldRestoreNullability)
-      }
+      for {
+        // Encoding and staging are the expensive steps and need no exclusive access, so they stay
+        // outside the mutex. Callers reach here from a `parEvalMapUnordered`, so batches encode and
+        // stage in parallel and only the view read-modify-write is serialized.
+        encoded <- SparkUtils.encodeBatch(spark, rows, schema)
+        staged <- SparkUtils.stageBatch(spark, encoded, schema, stageOffHeap)
+        // Recorded as soon as the batch is staged, which is when its blocks start existing, and
+        // before the wait for the append mutex rather than after it. A batch cancelled between the
+        // two stages blocks that never get recorded, and those are released by the ContextCleaner
+        // exactly as they were before this map existed - the safe way to lose the race, and not
+        // worth an `uncancelable` that would also make the staging job itself uninterruptible.
+        _ <- checkpointedRdds.update(m => m.updated(viewName, staged.checkpointed :: m.getOrElse(viewName, Nil)))
+        _ <- mutexForLocalAppending.lock.surround {
+               SparkUtils.appendStagedBatch(spark, viewName, staged.df, schema, shouldRestoreNullability)
+             }
+      } yield ()
 
     def removeDataFrameFromDisk(viewName: String) =
-      SparkUtils.dropView(spark, viewName)
+      for {
+        rdds <- checkpointedRdds.modify(m => (m - viewName, m.getOrElse(viewName, Nil)))
+        _ <- SparkUtils.dropView(spark, viewName, rdds)
+      } yield ()
 
     def commit(viewName: String): F[Unit] =
       for {
-        df <- SparkUtils.prepareFinalDataFrame(spark, viewName, writerParallelism, w.expectsSortedDataframe)
+        df <- SparkUtils.prepareFinalDataFrame(spark, viewName, writerParallelism)
         _ <- mutexForRemoteWriting.lock
                .surround {
                  w.write(df)

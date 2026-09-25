@@ -20,38 +20,43 @@ object Dependencies {
     }
 
     // Scala
-    val catsEffect       = "3.5.4"
+    val catsEffect       = "3.7.1"
     val decline          = "2.4.1"
     val circe            = "0.14.4"
-    val http4s           = "0.23.29"
+    val http4s           = "0.23.36"
     val betterMonadicFor = "0.3.1"
 
     // Spark
-    val delta              = "4.3.1"
+    val delta              = "4.4.0"
     val iceberg            = "1.11.0"
     val hadoop             = "3.5.0"
-    val googleCloudStorage = "2.70.0"
+    val googleCloudStorage = "2.72.0"
 
     // java
-    val slf4j       = "2.0.13"
-    val azureSdk    = "1.18.4"
-    val awsSdk1     = "1.12.777"
-    val awsSdk2     = "2.42.23" // Match common-streams
-    val awsRegistry = "1.1.20"
-    val jsonSmart   = "2.5.2"
+    val slf4j       = "2.0.18"
+    val azureSdk    = "1.18.6"
+    val awsSdk1     = "1.12.797"
+    val awsSdk2     = "2.54.11" // Match common-streams
+    val awsRegistry = "1.1.27"
 
     // Snowplow
-    val streams    = "0.26.0"
+    val streams    = "0.26.1"
     val igluClient = "4.2.1"
 
     // Transitive overrides
-    val kafka         = "3.9.2"
-    val lz4           = "1.11.1"
-    val log4jCore     = "2.25.4"
-    val micrometer    = "1.16.6"
-    val opentelemetry = "1.62.0"
-    val netty         = "4.2.16.Final"
+    val kafka      = "3.9.2"
+    val lz4        = "1.11.1"
+    val log4jCore  = "2.25.5"
+    val jackson    = "2.21.6"
+    val micrometer = "1.16.7"
+    val netty      = "4.2.17.Final"
+    // netty-tcnative has its own version scheme; it must match the tcnative.version pinned by
+    // the netty-parent pom of V.netty, because netty-handler calls into it via JNI-bound statics.
+    val nettyTcnative = "2.0.81.Final"
     val bouncyCastle  = "1.85"
+    val ivy           = "2.6.0"
+    val reactor       = "3.8.7"
+    val reactorNetty  = "1.3.7"
 
     // tests
     val specs2           = "4.20.0"
@@ -92,14 +97,25 @@ object Dependencies {
   val awsKms        = "software.amazon.awssdk" % "kms"                   % V.awsSdk2
   val dynamodbSdk1  = "com.amazonaws"          % "aws-java-sdk-dynamodb" % V.awsSdk1
   val awsRegistry   = "software.amazon.glue"   % "schema-registry-serde" % V.awsRegistry
-  val jsonSmart     = "net.minidev"            % "json-smart"            % V.jsonSmart
+  // Iceberg's HttpClientProperties defaults http-client.type to "apache", which reflectively loads
+  // ApacheHttpClientConfigurations -> software.amazon.awssdk.http.apache.ApacheHttpClient. Since
+  // the 2.44 -> 2.54 bump the awssdk services parent pom ships apache5-client at runtime scope
+  // instead, so apache-client has to be asked for explicitly or Iceberg's Glue/S3 client factories
+  // fail with NoClassDefFoundError.
+  val awsApacheClient = "software.amazon.awssdk" % "apache-client" % V.awsSdk2
 
   // transitive overrides
-  val kafkaClients  = "org.apache.kafka"         % "kafka-clients"     % V.kafka
-  val lz4           = "at.yawk.lz4"              % "lz4-java"          % V.lz4
-  val log4jCore     = "org.apache.logging.log4j" % "log4j-core"        % V.log4jCore
-  val micrometer    = "io.micrometer"            % "micrometer-core"   % V.micrometer
-  val opentelemetry = "io.opentelemetry"         % "opentelemetry-api" % V.opentelemetry
+  val kafkaClients      = "org.apache.kafka"           % "kafka-clients"              % V.kafka
+  val lz4               = "at.yawk.lz4"                % "lz4-java"                   % V.lz4
+  val log4jCore         = "org.apache.logging.log4j"   % "log4j-core"                 % V.log4jCore
+  val log4jTemplateJson = "org.apache.logging.log4j"   % "log4j-layout-template-json" % V.log4jCore
+  val jacksonDatabind   = "com.fasterxml.jackson.core" % "jackson-databind"           % V.jackson
+  val micrometer        = "io.micrometer"              % "micrometer-core"            % V.micrometer
+  val ivy               = "org.apache.ivy"             % "ivy"                        % V.ivy
+  val reactorCore       = "io.projectreactor"          % "reactor-core"               % V.reactor
+  val reactorNettyCore  = "io.projectreactor.netty"    % "reactor-netty-core"         % V.reactorNetty
+  val reactorNettyHttp  = "io.projectreactor.netty"    % "reactor-netty-http"         % V.reactorNetty
+
   // Spark pulls Netty's aggregator netty-all, which has a non-optional dependency on a
   // vulnerable bcprov-jdk18on 1.80; pin it to a patched version.
   val bouncyCastle = "org.bouncycastle" % "bcprov-jdk18on" % V.bouncyCastle
@@ -138,7 +154,16 @@ object Dependencies {
     "netty-transport-native-unix-common"
   )
 
-  val nettyDependencies: Seq[ModuleID] = nettyModules.map("io.netty" % _ % V.netty)
+  // netty-tcnative is versioned separately from the rest of Netty, so it is not covered by the
+  // pin above. Spark drags in an older one, and netty-handler is compiled against the statics of
+  // the version its own parent pom pins, so the two have to be bumped together.
+  private val nettyTcnativeModules = Seq(
+    "netty-tcnative-boringssl-static",
+    "netty-tcnative-classes"
+  )
+
+  val nettyDependencies: Seq[ModuleID] =
+    nettyModules.map("io.netty" % _ % V.netty) ++ nettyTcnativeModules.map("io.netty" % _ % V.nettyTcnative)
 
   // snowplow
   val streamsCore      = "com.snowplowanalytics" %% "streams-core"             % V.streams
@@ -173,6 +198,9 @@ object Dependencies {
     hadoopClient,
     lz4,
     log4jCore,
+    log4jTemplateJson,
+    jacksonDatabind,
+    ivy,
     bouncyCastle,
     specs2,
     catsEffectSpecs2,
@@ -187,9 +215,10 @@ object Dependencies {
     awsGlue,
     awsSts,
     dynamodbSdk1,
-    awsKms        % Runtime,
-    deltaDynamodb % Runtime,
-    awsS3Transfer % Runtime
+    awsKms          % Runtime,
+    awsApacheClient % Runtime,
+    deltaDynamodb   % Runtime,
+    awsS3Transfer   % Runtime
   ) ++ commonRuntimeDependencies
 
   val azureDependencies = Seq(
@@ -197,16 +226,17 @@ object Dependencies {
     azureIdentity,
     hadoopAzure,
     hadoopClient,
-    jsonSmart,
     kafkaClients % Runtime,
+    reactorCore,
+    reactorNettyCore,
+    reactorNettyHttp,
     specs2
   ) ++ commonRuntimeDependencies
 
   val gcpDependencies = Seq(
     pubsub,
     hadoopGcp,
-    googleCloudStorage,
-    opentelemetry % Runtime
+    googleCloudStorage
   ) ++ commonRuntimeDependencies
 
   val commonExclusions = Seq(
