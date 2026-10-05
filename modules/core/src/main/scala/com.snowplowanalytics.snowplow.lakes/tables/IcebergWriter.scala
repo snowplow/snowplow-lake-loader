@@ -54,6 +54,13 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
           $locationClause
         """)
       }.void *>
+      // CREATE TABLE IF NOT EXISTS ignores TBLPROPERTIES for a table that already exists, so we also
+      // apply them explicitly. Otherwise a table created by an older config never picks up new properties.
+      Logger[F].info(s"Applying table properties to Iceberg table $fqTable...") *>
+      Sync[F].blocking {
+        if (config.icebergTableProperties.nonEmpty)
+          spark.sql(s"ALTER TABLE $fqTable SET TBLPROPERTIES($tableProps)")
+      }.void *>
       // We make an empty commit during startup, so the loader can fail early if we are missing any permissions
       write[F](spark.createDataFrame(List.empty[Row].asJava, SparkSchema.structForCreate))
 
