@@ -1,3 +1,7 @@
+Version 0.14.1 (2026-10-24)
+---------------------------
+Trigger build with newest base image
+
 Version 0.14.0 (2026-09-17)
 ---------------------------
 Bump dependencies for 0.14.0 release (#97)
