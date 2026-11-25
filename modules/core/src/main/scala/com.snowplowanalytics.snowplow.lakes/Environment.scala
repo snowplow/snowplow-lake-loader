@@ -34,6 +34,9 @@ import com.snowplowanalytics.snowplow.runtime.{AppHealth, AppInfo, HealthProbe, 
  *   loader works on batches *in parallel*, it is possible for the loader to be holding more than
  *   this number of bytes in memory at any one time.
  *
+ * @param entitySupersetCapacity
+ *   How many entities `processing.EntitySuperset` can hold.
+ *
  * Other params are self-explanatory
  */
 case class Environment[F[_]](
@@ -42,7 +45,7 @@ case class Environment[F[_]](
   badSink: Sink[F],
   resolver: Resolver[F],
   httpClient: Client[F],
-  lakeWriter: LakeWriter.WithHandledErrors[F],
+  lakeWriter: LakeWriter[F],
   metrics: Metrics[F],
   appHealth: AppHealth.Interface[F, Alert, RuntimeService],
   cpuParallelism: Int,
@@ -52,6 +55,7 @@ case class Environment[F[_]](
   schemasToSkip: List[SchemaCriterion],
   respectIgluNullability: Boolean,
   exitOnMissingIgluSchema: Boolean,
+  entitySupersetCapacity: Int,
   decompression: DecompressionConfig
 )
 
@@ -79,22 +83,24 @@ object Environment {
           .sink(config.main.output.bad.sink)
           .onError(_ => Resource.eval(appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)))
       windowing <- Resource.eval(EventProcessingConfig.TimedWindows.build(config.main.windowing, config.main.numEagerWindows))
+      destinationAndTableFormatSetupErrorCheck = destinationSetupErrorCheck.orElse(TableFormatSetupError.check(config.main.output.good))
       lakeWriter <- LakeWriter.build(
                       config.main.spark,
                       config.main.output.good,
                       config.main.respectIgluNullability,
-                      cores = Runtime.getRuntime.availableProcessors
+                      cores = Runtime.getRuntime.availableProcessors,
+                      appHealth,
+                      config.main.retries,
+                      destinationAndTableFormatSetupErrorCheck
                     )
-      destinationAndTableFormatSetupErrorCheck = destinationSetupErrorCheck.orElse(TableFormatSetupError.check(config.main.output.good))
-      lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, appHealth, config.main.retries, destinationAndTableFormatSetupErrorCheck)
-      cpuParallelism    = chooseCpuParallelism(config.main)
+      cpuParallelism = chooseCpuParallelism(config.main)
     } yield Environment(
       appInfo                 = appInfo,
       source                  = sourceAndAck,
       badSink                 = badSink,
       resolver                = resolver,
       httpClient              = httpClient,
-      lakeWriter              = lakeWriterWrapped,
+      lakeWriter              = lakeWriter,
       metrics                 = metrics,
       appHealth               = appHealth,
       cpuParallelism          = cpuParallelism,
@@ -104,6 +110,7 @@ object Environment {
       schemasToSkip           = config.main.skipSchemas,
       respectIgluNullability  = config.main.respectIgluNullability,
       exitOnMissingIgluSchema = config.main.exitOnMissingIgluSchema,
+      entitySupersetCapacity  = config.main.entitySupersetCapacity,
       decompression           = config.main.decompression
     )
 

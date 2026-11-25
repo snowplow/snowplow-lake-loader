@@ -25,6 +25,8 @@ import org.apache.iceberg.rest.auth.OAuth2Properties
 
 import org.apache.spark.sql.delta.DeltaAnalysisException
 
+import com.snowplowanalytics.snowplow.lakes.tables.IcebergWriter
+
 import java.net.UnknownHostException
 
 object TableFormatSetupError {
@@ -72,12 +74,16 @@ object TableFormatSetupError {
           Some("IAM role of the REST catalog is missing permissions")
         else if (checkRestCatalogRolePermissionError(e))
           Some("REST catalog role is missing permissions")
-        else if (checkRestSpecPermissionError(e))
+        else if (checkRestSpecPermissionError(e) || checkTablePermissionError(e))
           Some("Missing privileges on the catalog, schema or table")
+        else if (checkApiDisabledError(e))
+          Some(
+            "REST catalog API is disabled for the loader's credentials. Check the entitlements granted to the loader's service principal"
+          )
         else
           None
-      case e: NoSuchNamespaceException =>
-        Some(e.getMessage)
+      case _: NoSuchNamespaceException =>
+        Some("Unable to find given namespace")
       case e: BadRequestException if messageContains(e, "CATALOG_DOES_NOT_EXIST") =>
         // Databricks responds with HTTP 400 when the catalog (warehouse) does not exist
         Some("Unable to find given catalog")
@@ -90,6 +96,17 @@ object TableFormatSetupError {
         extractOauthErrorType(e).map(oauthErrorMessage)
       case _: NoSuchWarehouseException =>
         Some("Unable to find given catalog")
+      case _: IcebergWriter.NoVendedCredentialsError =>
+        // The catalog options asked for vended credentials, and the catalog loaded the table without any
+        Some(
+          "REST catalog did not provide storage credentials for the table. Check that the catalog allows external engines to access the table's storage"
+        )
+      case _: SnowflakeKeyPairAuthManager.UnparseablePrivateKeyError =>
+        // The customer's key is not a PKCS#8 PEM, or its passphrase is wrong
+        Some("Snowflake private key cannot be parsed. Check that it is a PKCS#8 PEM key and that its passphrase is correct")
+      case _: SnowflakeKeyPairAuthManager.NonRsaPrivateKeyError =>
+        // The customer's key parses, but Snowflake key-pair auth needs an RSA key
+        Some("Snowflake private key is not an RSA key")
       case e: RESTException if isTransientHttpStatus(e) =>
         // Transient status (timeout / rate limiting / gateway error); must be retried, not classified as a setup error
         None
@@ -142,6 +159,22 @@ object TableFormatSetupError {
      */
     private def checkRestSpecPermissionError(exception: IcebergForbiddenException): Boolean =
       messageContains(exception, "Not authorized to make this request")
+
+    /**
+     * Databricks Unity Catalog's 403 when the denial happens at table level, for example a missing
+     * USE SCHEMA. A missing USE CATALOG is denied at namespace level instead, with the REST spec's
+     * canonical message.
+     */
+    private def checkTablePermissionError(exception: IcebergForbiddenException): Boolean =
+      messageContains(exception, "Permission denied accessing table")
+
+    /**
+     * Databricks' 403 when the service principal lacks the workspace entitlement that the REST
+     * catalog API requires. Databricks sends it in its own JSON format rather than the REST spec's,
+     * so Iceberg cannot parse it and the message carries the raw body.
+     */
+    private def checkApiDisabledError(exception: IcebergForbiddenException): Boolean =
+      messageContains(exception, "This API is disabled for users without")
 
     private def checkFileReadPermissionError(exception: IcebergForbiddenException): Boolean = {
       val badRequestPattern = """.*Forbidden: Failed to read file.*""".r

@@ -22,6 +22,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.types.{ArrayType, StructType}
 
 import scala.concurrent.duration.DurationInt
+import scala.jdk.CollectionConverters._
 import fs2.io.file.{Files, Path}
 
 import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData}
@@ -51,6 +52,8 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
     Preserve required struct field nullability when schema evolves within a single window, staging batches off-heap $e13
     Release the window's checkpoint blocks once the window has been committed and dropped $e14
     Write each event's own event_name, which is the value the commit's partitioning is keyed on $e15
+    Write only the window's own entity columns to its data files, though batches are padded to every entity seen $e16
+    Preserve required nested field nullability when a batch is padded with an entity it lacks $e17
   """
 
   /* Only e12 and e13 use the off-heap staging path: end-to-end content, and a multi-batch union
@@ -783,6 +786,130 @@ abstract class AbstractSparkSpec extends Specification with CatsEffect {
         }
       }
   }
+
+  /**
+   * Batches are staged padded to every entity seen since startup, so window 2's view has window 1's
+   * columns too. `prepareFinalDataFrame` selects the window's own columns before the write, so each
+   * window's data files still hold only the entities its events carried - present entities' main
+   * columns, plus the recovery column only where the breaking version was present. Read from the
+   * parquet files themselves, because the table's schema is the union over every window and cannot
+   * tell the two apart.
+   */
+  def e16 = Files[IO].tempDirectory.use { tmpDir =>
+    def ue(
+      name: String,
+      version: SchemaVer.Full,
+      colA: Json
+    ) =
+      SnowplowEvent.UnstructEvent(Some(SelfDescribingData(SchemaKey("myvendor", name, "jsonschema", version), Json.obj("col_a" -> colA))))
+    val goodContext = SnowplowEvent.Contexts(
+      List(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodcontext", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+
+    val resources = for {
+      w1a <- Resource.eval(EventUtils.good(ue = ue("goodschema", SchemaVer.Full(7, 0, 0), Json.fromString("xyz"))).flatMap(_.tokened))
+      w1b <- Resource.eval(EventUtils.good(ue = ue("badevolution", SchemaVer.Full(1, 0, 1), Json.fromInt(1))).flatMap(_.tokened))
+      w2a <- Resource.eval(EventUtils.good(contexts = goodContext).flatMap(_.tokened))
+      w2b <- Resource.eval(EventUtils.good(ue = ue("badevolution", SchemaVer.Full(1, 0, 0), Json.fromString("xyz"))).flatMap(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(List(w1a, w1b), List(w2a, w2b)))
+    } yield env
+
+    // The hash in a recovery column's name is of the schema, so it is replaced to keep this readable.
+    def entityColumns(names: Seq[String]): Set[String] =
+      names
+        .filter(n => n.startsWith("unstruct_event_") || n.startsWith("contexts_"))
+        .map(n => if (n.contains("_recovered_")) n.substring(0, n.indexOf("_recovered_")) + "_recovered" else n)
+        .toSet
+
+    resources.use(env => Processing.stream(env).compile.drain) >>
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking {
+          val dataFiles = java.nio.file.Files
+            .walk(tmpDir.toNioPath)
+            .iterator()
+            .asScala
+            .map(_.toString)
+            .filter(f => f.endsWith(".parquet") && !f.contains("_delta_log") && !f.contains("/metadata/"))
+            .toList
+          dataFiles.map(f => entityColumns(spark.read.parquet(f).schema.fieldNames.toSeq)).toSet
+        }.map { columnSets =>
+          columnSets must beEqualTo(
+            Set(
+              Set(
+                "unstruct_event_myvendor_goodschema_7",
+                "unstruct_event_myvendor_badevolution_1",
+                "unstruct_event_myvendor_badevolution_1_recovered"
+              ),
+              Set("contexts_myvendor_goodcontext_1", "unstruct_event_myvendor_badevolution_1")
+            )
+          )
+        }
+      }
+  }
+
+  /**
+   * Window 1 puts `nestedschema`, whose `inner.id` is required, in the superset. In window 2 the
+   * first batch lacks it and is padded with an all-null column, and the second has it. Both batches
+   * have the identical schema, so the union does not widen `inner.id` and the restore has nothing
+   * to do; the write must succeed and keep the field required where the format can.
+   */
+  def e17 = Files[IO].tempDirectory.use { tmpDir =>
+    val ue100 = SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "nestedschema", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("inner" -> Json.obj("id" -> Json.fromString("id_val")))
+        )
+      )
+    )
+
+    val resources = for {
+      window1 <- Resource.eval(EventUtils.good(ue = ue100).flatMap(_.tokened))
+      padded <- Resource.eval(EventUtils.good().flatMap(_.tokened))
+      withIt <- Resource.eval(EventUtils.good(ue = ue100).flatMap(_.tokened))
+      env <- TestSparkEnvironment.build(target, tmpDir, List(List(window1), List(padded, withIt)), inMemBatchBytes = 1L)
+    } yield env
+
+    resources.use(env => Processing.stream(env).compile.drain) *> {
+      sparkForAssertions(sparkConfig(tmpDir)).use { spark =>
+        IO.blocking(readTable(spark, tmpDir)).map { df =>
+          import spark.implicits._
+
+          val innerIdNullable = df.schema
+            .find(_.name === "unstruct_event_myvendor_nestedschema_1")
+            .flatMap(_.dataType match {
+              case s: StructType => s.fields.find(_.name === "inner")
+              case _             => None
+            })
+            .flatMap(_.dataType match {
+              case s: StructType => s.fields.find(_.name === "id")
+              case _             => None
+            })
+            .map(_.nullable)
+
+          val ids = df.select("unstruct_event_myvendor_nestedschema_1.inner.id").as[String].collect().toSeq
+
+          val nullabilityAssertion: MatchResult[Any] =
+            if (supportsRequiredNestedFields)
+              innerIdNullable must beSome(false)
+            else
+              innerIdNullable must beSome[Boolean]
+
+          List[MatchResult[Any]](
+            nullabilityAssertion,
+            df.count() must beEqualTo(6L),
+            ids must containTheSameElementsAs(Seq[String]("id_val", "id_val", null, null, null, null))
+          ).reduce(_ and _)
+        }
+      }
+    }
+  }
+
 }
 
 object AbstractSparkSpec {

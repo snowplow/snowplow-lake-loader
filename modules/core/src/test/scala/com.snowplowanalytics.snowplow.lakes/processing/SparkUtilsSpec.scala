@@ -897,7 +897,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     for {
       _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
       rdd <- localAppendRows(spark, viewName, eventRows("e1", "e2"), eventSchema, shouldRestoreNullability = true)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       shuffleId = shuffled.shuffle.map(_.id).getOrElse(throw new IllegalStateException("Expected a shuffle id"))
       registeredBefore <- IO.blocking(SnowplowSparkBlockProbe.shuffleRegistered(shuffleId))
@@ -915,7 +915,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     for {
       _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
       rdd <- localAppendRows(spark, viewName, eventRows("e1", "e2", "e3"), eventSchema, shouldRestoreNullability = true)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 2, defaultPartitioning, pageViewCounts(3))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 2, defaultPartitioning, pageViewCounts(3))
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
       _ <- SparkUtils.releaseStagedBatches[IO](List(rdd))
@@ -939,7 +939,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
                 localAppendRows(spark, viewName, _, eventSchema, shouldRestoreNullability = true)
               )
       partitionsBefore <- IO.blocking(spark.table(viewName).queryExecution.toRdd.getNumPartitions)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 1, defaultPartitioning, pageViewCounts(2))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 1, defaultPartitioning, pageViewCounts(2))
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
       persisted <- IO.blocking(rdds.forall(rdd => spark.sparkContext.getPersistentRDDs.contains(rdd.id)))
@@ -967,7 +967,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     for {
       _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
       _ <- localAppendRows(spark, viewName, eventRows("e1", "e2"), eventSchema, shouldRestoreNullability = true)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
       first <- stampsFromOneAttempt
@@ -1009,7 +1009,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val viewName = "test_split_partitioning_e24"
     for {
       _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, skewedCounts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, skewedCounts)
       numPartitions <- IO.blocking(df.rdd.getNumPartitions)
       placements <- IO.blocking(collectPlacements(df))
       partitionSizes = placements.groupBy(_._2).view.mapValues(_.size).values.toList
@@ -1032,7 +1032,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val viewName = "test_small_name_kept_whole_e25"
     for {
       _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, skewedCounts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, skewedCounts)
       placements <- IO.blocking(collectPlacements(df))
       spreadOfColdNames = placements.collect { case (name, partition) if name.startsWith("cold_") => (name, partition) }.distinct
     } yield spreadOfColdNames.groupBy(_._1).values.map(_.size).toList.distinct must_== List(1)
@@ -1046,7 +1046,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val counts   = Map(Option("hot") -> 2)
     for {
       _ <- IO.blocking(windowOf(spark, counts).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 31, tricklePartitioning, counts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 31, tricklePartitioning, counts)
       placements <- IO.blocking(collectPlacements(df))
     } yield (placements.size must_== 2) and (placements.map(_._2).distinct.size must_== 1)
   }
@@ -1059,7 +1059,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val counts   = Map(Option.empty[String] -> 600)
     for {
       _ <- IO.blocking(windowOf(spark, counts).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, counts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, counts)
       numPartitions <- IO.blocking(df.rdd.getNumPartitions)
       perPartition <- IO.blocking(df.rdd.mapPartitions(rows => Iterator(rows.size)).collect().toList)
     } yield (numPartitions must_== 6) and
@@ -1077,7 +1077,7 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val viewName = "test_partition_array_folded_e28"
     for {
       _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, writerParallelism = 6, skewPartitioning, skewedCounts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, skewedCounts)
       // The repartition's own expression, not whatever else the plan holds, so this cannot pass on
       // a folded array that came from somewhere else - and fails loudly if the plan shape moves.
       expressions <- IO.blocking {
@@ -1154,16 +1154,10 @@ object SparkUtilsSpec {
   private def windowOf(spark: SparkSession, counts: Map[Option[String], Int]): DataFrame = {
     val rows = counts.toList.sortBy(_._1).flatMap { case (name, count) =>
       (1 to count).map { i =>
-        Row(name.orNull, UUID.nameUUIDFromBytes(s"${name.getOrElse("<null>")}-$i".getBytes(StandardCharsets.UTF_8)).toString)
+        atomicRow(UUID.nameUUIDFromBytes(s"${name.getOrElse("<null>")}-$i".getBytes(StandardCharsets.UTF_8)).toString, name.orNull)
       }
     }
-    val schema = StructType(
-      Array(
-        StructField("event_name", StringType, nullable = true),
-        StructField("event_id", StringType, nullable   = false)
-      )
-    )
-    spark.createDataFrame(rows.asJava, schema)
+    spark.createDataFrame(rows.asJava, eventSchema)
   }
 
   /** Every event's (event_name, spark partition index), which is what both properties are about. */
@@ -1173,17 +1167,21 @@ object SparkUtilsSpec {
       .collect()
       .toList
 
-  // prepareFinalDataFrame repartitions by event_name and event_id, so any schema reaching it must
-  // carry both columns.
-  private val eventSchema = StructType(
-    Array(
-      StructField("event_id", StringType, nullable   = false),
-      StructField("event_name", StringType, nullable = false)
-    )
-  )
+  // prepareFinalDataFrame selects the atomic columns and repartitions by event_name and event_id.
+  // Only those two are set, so the others are nullable here.
+  private val eventSchema = StructType(SparkSchema.atomic.map(f => f.copy(nullable = f.name =!= "event_id")))
+
+  private def atomicRow(eventId: String, eventName: String): Row =
+    Row.fromSeq(eventSchema.fields.toSeq.map { f =>
+      f.name match {
+        case "event_id"   => eventId
+        case "event_name" => eventName
+        case _            => null
+      }
+    })
 
   private def eventRows(ids: String*): NonEmptyList[Row] =
-    NonEmptyList.fromListUnsafe(ids.toList.map(id => Row(id, "page_view")))
+    NonEmptyList.fromListUnsafe(ids.toList.map(atomicRow(_, "page_view")))
 
   private def withSpark: Resource[IO, SparkSession] = {
     val build = IO.blocking(

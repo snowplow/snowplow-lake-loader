@@ -88,6 +88,20 @@
 #       "options": {
 #          # -- For example, to enable the catalog cache
 #          "cache-enabled": "true"
+#
+#          # -- For example, to authenticate to Snowflake's Horizon REST catalog with a key pair:
+#          "rest.auth.type": "com.snowplowanalytics.snowplow.lakes.SnowflakeKeyPairAuthManager"
+#          # -- Snowflake account identifier and the user the public key is registered against
+#          # -- The account is `<ORG>-<ACCOUNT>` (a hyphen, not a period), or an account locator without its region,
+#          # -- e.g. `XY12345`, not `XY12345.us-east-1`. Any other format is rejected by Snowflake as bad credentials.
+#          "snowflake.auth.account": "MYORG-MYACCT"
+#          "snowflake.auth.user": "LAKE_LOADER_SVC"
+#          # -- The PKCS#8 private key in PEM format
+#          "snowflake.auth.private-key": ${SNOWFLAKE_PRIVATE_KEY}
+#          # -- Optional. Passphrase of an encrypted private key
+#          "snowflake.auth.private-key-passphrase": ${SNOWFLAKE_PRIVATE_KEY_PASSPHRASE}
+#          # -- The Snowflake role the loader acts as
+#          "scope": "session:role:LAKE_LOADER_ROLE"
 #       }
 #     }
 #
@@ -233,6 +247,11 @@
   # -- indicates an error that needs addressing.
   # -- Change to `false` so events go the failed events stream instead of crashing the loader.
   "exitOnMissingIgluSchema": true
+
+  # -- The maximum number of schemas the loader keeps track of, so that every batch gets the same Spark schema and
+  # -- Spark does not keep compiling new code. Each is a schema family used as an unstruct event or a context.
+  # -- Raise this if the loader warns that schemas did not fit. The `entity_superset_entries` metric reports how many it keeps.
+  "entitySupersetCapacity": 500
 
   # -- Whether the output parquet files should declare nested fields as non-nullable according to the Iglu schema.
   # -- When true (default), nested fields are nullable only if they are not required fields according to the Iglu schema.

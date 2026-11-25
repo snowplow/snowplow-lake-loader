@@ -16,6 +16,8 @@ import cats.implicits._
 
 import java.time.Instant
 
+import com.snowplowanalytics.snowplow.loaders.transform.TabledEntity
+
 /**
  * Local in-memory state which is accumulated as a window gets processed
  *
@@ -40,6 +42,8 @@ import java.time.Instant
  *   loses that share of its parallelism with every gauge reading healthy.
  * @param earliestCollectorTstamp
  *   The earliest collector_tstamp of all events seen in the window
+ * @param notStored
+ *   Entities that took the `EntitySuperset` fallback in this window because it was full.
  * @param id
  *   An id for this window, which is unique within the internals of a running loader. It increments
  *   from one.
@@ -51,22 +55,26 @@ private[processing] case class WindowState(
   numEvents: Int,
   eventNameCounts: Map[Option[String], Int],
   earliestCollectorTstamp: Option[Instant],
+  notStored: Set[TabledEntity],
   id: Int
 ) {
 
   /** The name by which the current DataFrame is known to the Spark catalog */
   val viewName: String =
-    f"v$id%010d"
+    WindowState.viewName(id)
 }
 
 private[processing] object WindowState {
+
+  def viewName(id: Int): String =
+    f"v$id%010d"
 
   class Factory[F[_]: Sync] private[WindowState] (counter: Ref[F, Int]) {
     def build: F[WindowState] =
       for {
         now <- Sync[F].realTimeInstant
         i <- counter.updateAndGet(_ + 1)
-      } yield WindowState(Nil, now, Set.empty, 0, Map.empty, None, i)
+      } yield WindowState(Nil, now, Set.empty, 0, Map.empty, None, Set.empty, i)
   }
 
   def factory[F[_]: Sync]: F[Factory[F]] =

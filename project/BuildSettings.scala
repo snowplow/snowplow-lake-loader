@@ -90,16 +90,16 @@ object BuildSettings {
   lazy val appSettings = Seq(
     buildInfoKeys := Seq[BuildInfoKey](dockerAlias, name, version),
     buildInfoPackage := "com.snowplowanalytics.snowplow.lakes",
-    buildInfoOptions += BuildInfoOption.Traits("com.snowplowanalytics.snowplow.runtime.AppInfo")
+    buildInfoOptions += BuildInfoOption.Traits("com.snowplowanalytics.snowplow.runtime.AppInfo"),
+
+    // Delta's S3DynamoDBLogStore still authenticates through the AWS v1 SDK, which prints a
+    // deprecation announcement on first use. Remove this once delta-storage-s3-dynamodb moves to v2.
+    dockerEnvVars += ("AWS_JAVA_V1_DISABLE_DEPRECATION_ANNOUNCEMENT" -> "true")
   ) ++ commonSettings
 
   lazy val awsSettings = appSettings ++ Seq(
     name := "lake-loader-aws",
     buildInfoKeys += BuildInfoKey("cloud" -> "AWS"),
-
-    // Delta's S3DynamoDBLogStore still authenticates through the AWS v1 SDK, which prints a
-    // deprecation announcement on first use. Remove this once delta-storage-s3-dynamodb moves to v2.
-    dockerEnvVars += ("AWS_JAVA_V1_DISABLE_DEPRECATION_ANNOUNCEMENT" -> "true"),
 
     // Set Java module flags via JAVA_OPTS environment variable
     dockerEnvVars += ("JAVA_OPTS" -> javaModuleFlags.mkString(" "))

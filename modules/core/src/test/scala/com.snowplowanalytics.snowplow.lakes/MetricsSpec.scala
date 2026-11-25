@@ -29,6 +29,7 @@ class MetricsSpec extends Specification with CatsEffect {
   The scrape endpoint should:
     expose the spark usage gauges under the names they were registered with $e1
     expose the latency metrics with the unit suffix prometheus gives them $e2
+    expose the number of entries in the entity superset, with the configured tags $e3
   """
 
   def e1 =
@@ -73,6 +74,20 @@ class MetricsSpec extends Specification with CatsEffect {
             )
           )
         }
+      }
+
+  def e3 =
+    Metrics
+      .build[IO](
+        Config.Metrics(statsd = None, prometheus = CommonMetrics.PrometheusConfig(tags = Map("env" -> "test"))),
+        5.minutes,
+        dummySource
+      )
+      .use { metrics =>
+        for {
+          _ <- metrics.setEntitySupersetEntries(125L)
+          scraped <- metrics.scrape
+        } yield scraped.linesIterator.map(_.trim).toList must contain("""entity_superset_entries{env="test"} 125.0""")
       }
 
   private def dummySource: SourceAndAck[IO] = new SourceAndAck[IO] {

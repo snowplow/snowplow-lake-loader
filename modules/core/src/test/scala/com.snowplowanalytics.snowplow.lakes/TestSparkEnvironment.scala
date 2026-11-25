@@ -46,9 +46,16 @@ object TestSparkEnvironment {
     // Four cores, so writerParallelism is 3 and prepareFinalDataFrame repartitions. These specs are
     // the only end-to-end coverage of materializeShuffle, the early release of the staged batches
     // and a commit that reads from shuffle output, so they have to stay on that branch rather than
-    // inherit whatever the machine has. LakeWriterSpec e12 covers the coalescing branch.
-    lakeWriter <- LakeWriter.build[IO](testConfig.spark, testConfig.output.good, respectIgluNullability = true, cores = 4)
-    lakeWriterWrapped = LakeWriter.withHandledErrors(lakeWriter, dummyAppHealth, retriesConfig, PartialFunction.empty)
+    // inherit whatever the machine has. LakeWriterSpec e4 covers the coalescing branch.
+    lakeWriter <- LakeWriter.build[IO](
+                    testConfig.spark,
+                    testConfig.output.good,
+                    respectIgluNullability = true,
+                    cores                  = 4,
+                    dummyAppHealth,
+                    retriesConfig,
+                    PartialFunction.empty
+                  )
   } yield Environment(
     appInfo = appInfo,
     source  = source,
@@ -58,7 +65,7 @@ object TestSparkEnvironment {
     },
     resolver                = Resolver[IO](Nil, None),
     httpClient              = testHttpClient,
-    lakeWriter              = lakeWriterWrapped,
+    lakeWriter              = lakeWriter,
     metrics                 = testMetrics,
     appHealth               = dummyAppHealth,
     inMemBatchBytes         = inMemBatchBytes,
@@ -68,6 +75,7 @@ object TestSparkEnvironment {
     schemasToSkip           = List.empty,
     respectIgluNullability  = true,
     exitOnMissingIgluSchema = false,
+    entitySupersetCapacity  = 500,
     decompression           = DecompressionConfig(maxBytesInBatch = 5242880, maxBytesSinglePayload = 10000000)
   )
 
@@ -117,6 +125,7 @@ object TestSparkEnvironment {
     def setStorageMemoryBytes(bytes: Long): IO[Unit]            = IO.unit
     def setStorageDiskBytes(bytes: Long): IO[Unit]              = IO.unit
     def setDiskBytes(bytes: Long): IO[Unit]                     = IO.unit
+    def setEntitySupersetEntries(count: Long): IO[Unit]         = IO.unit
     def scrape: IO[String]                                      = IO.pure("")
     def report: Stream[IO, Nothing]                             = Stream.never[IO]
   }

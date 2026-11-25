@@ -211,6 +211,11 @@
   # -- Change to `false` so events go the failed events stream instead of crashing the loader.
   "exitOnMissingIgluSchema": true
 
+  # -- The maximum number of schemas the loader keeps track of, so that every batch gets the same Spark schema and
+  # -- Spark does not keep compiling new code. Each is a schema family used as an unstruct event or a context.
+  # -- Raise this if the loader warns that schemas did not fit. The `entity_superset_entries` metric reports how many it keeps.
+  "entitySupersetCapacity": 500
+
   # -- Whether the output parquet files should declare nested fields as non-nullable according to the Iglu schema.
   # -- When true (default), nested fields are nullable only if they are not required fields according to the Iglu schema.
   # -- When false, all nested fields are defined as nullable in the output table's schemas

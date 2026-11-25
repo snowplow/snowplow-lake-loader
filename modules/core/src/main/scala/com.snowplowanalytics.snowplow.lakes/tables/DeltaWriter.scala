@@ -10,7 +10,8 @@
 
 package com.snowplowanalytics.snowplow.lakes.tables
 
-import java.net.InetAddress
+import java.net.{InetAddress, UnknownHostException}
+import java.util.UUID
 
 import cats.implicits._
 import cats.effect.Sync
@@ -37,7 +38,7 @@ class DeltaWriter(config: Config.Delta) extends Writer {
       "spark.sql.catalog.spark_catalog" -> "org.apache.spark.sql.delta.catalog.DeltaCatalog"
     )
 
-  override def prepareTable[F[_]: Sync](spark: SparkSession): F[Unit] = {
+  override def prepareTable[F[_]: Sync](spark: SparkSession, processId: UUID): F[Unit] = {
     val builder = DeltaTable
       .createIfNotExists(spark)
       .partitionedBy("load_tstamp_date", "event_name")
@@ -60,12 +61,15 @@ class DeltaWriter(config: Config.Delta) extends Writer {
         .build()
     }: Unit
 
-    // For Azure a wrong storage name means an invalid hostname and infinite retries when creating the Delta table
-    // If the hostname is invalid, UnknownHostException gets thrown
+    // hadoop-azure retries an unresolvable host for minutes before failing, so a wrong storage
+    // account name is caught here first
     val checkHostname =
-      if (List("abfs", "abfss").contains(config.location.getScheme))
-        Sync[F].blocking(InetAddress.getByName(config.location.getHost()))
-      else
+      if (List("abfs", "abfss").contains(config.location.getScheme)) {
+        val host = config.location.getHost()
+        Sync[F].blocking(InetAddress.getByName(host)).void.adaptError { case e: UnknownHostException =>
+          new DeltaWriter.UnresolvedStorageHostException(host, e)
+        }
+      } else
         Sync[F].unit
 
     Logger[F].info(s"Creating Delta table ${config.location} if it does not already exist...") >>
@@ -126,8 +130,15 @@ class DeltaWriter(config: Config.Delta) extends Writer {
    *
    * Retry happens immediately with no delay. For this type of exception there is no reason to
    * delay.
+   *
+   * Ignores `windowId` and `isRetry`, so a retried commit that had in fact landed writes the window
+   * again.
    */
-  override def write[F[_]: Sync](df: DataFrame): F[Unit] =
+  override def write[F[_]: Sync](
+    df: DataFrame,
+    windowId: Writer.WindowId,
+    isRetry: Boolean
+  ): F[Unit] =
     Sync[F].untilDefinedM {
       Sync[F]
         .blocking[Option[Unit]] {
@@ -172,4 +183,17 @@ class DeltaWriter(config: Config.Delta) extends Writer {
                 currentVersion - earliestVersion + 1
               }
     } yield count
+}
+
+object DeltaWriter {
+
+  /**
+   * The host of an ABFS table location does not resolve, e.g. a wrong storage account name
+   *
+   * Thrown by the host check in `prepareTable` in place of the bare `UnknownHostException`, which
+   * s3a and Iceberg REST catalogs also throw. `DestinationSetupError` must not match other stores'
+   * exceptions, so this type is what lets `DestinationSetupError.Azure` recognise the failure.
+   */
+  final class UnresolvedStorageHostException(val host: String, cause: UnknownHostException)
+      extends Exception(s"Storage host $host does not resolve", cause)
 }

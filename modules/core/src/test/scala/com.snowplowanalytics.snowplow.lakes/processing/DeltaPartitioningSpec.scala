@@ -24,7 +24,7 @@ import java.util.UUID
 import scala.concurrent.duration.DurationInt
 
 import com.snowplowanalytics.snowplow.lakes.{Config, TestConfig}
-import com.snowplowanalytics.snowplow.lakes.tables.DeltaWriter
+import com.snowplowanalytics.snowplow.lakes.tables.{DeltaWriter, Writer}
 
 /**
  * `WriterPartitioner` decides how the window is spread over the writer's partitions, and the whole
@@ -74,7 +74,7 @@ class DeltaPartitioningSpec extends Specification with CatsEffect {
       val rows   = NonEmptyList.fromListUnsafe(eventNames.map(mkRow(schema, _)))
 
       for {
-        _ <- writer.prepareTable[IO](spark)
+        _ <- writer.prepareTable[IO](spark, UUID.randomUUID)
         _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
         encoded <- SparkUtils.encodeBatch[IO](spark, rows, schema)
         staged <- SparkUtils.stageBatch[IO](spark, encoded, schema, stageOffHeap = false)
@@ -82,14 +82,15 @@ class DeltaPartitioningSpec extends Specification with CatsEffect {
         prepared <- SparkUtils.prepareFinalDataFrame[IO](
                       spark,
                       viewName,
-                      writerParallelism  = 3,
-                      writerPartitioning = partitioning,
-                      eventNameCounts    = counts
+                      nonAtomicColumnNames = Set.empty,
+                      writerParallelism    = 3,
+                      writerPartitioning   = partitioning,
+                      eventNameCounts      = counts
                     )
         shuffled <- SparkUtils.materializeShuffle[IO](spark, prepared)
         _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
         toWrite <- SparkUtils.readFinalDataFrame[IO](spark, viewName)
-        _ <- writer.write[IO](toWrite)
+        _ <- writer.write[IO](toWrite, Writer.WindowId(UUID.randomUUID, viewName), isRetry = false)
         filesPerEventName <- IO.blocking {
                                parquetFiles(new File(delta.location))
                                  .groupBy(_.getParentFile.getName.stripPrefix("event_name="))

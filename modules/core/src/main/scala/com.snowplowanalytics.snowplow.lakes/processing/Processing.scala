@@ -36,14 +36,7 @@ import com.snowplowanalytics.snowplow.streams.compression.Decompression._
 import com.snowplowanalytics.snowplow.lakes.{Environment, RuntimeService}
 import com.snowplowanalytics.snowplow.runtime.processing.BatchUp
 import com.snowplowanalytics.snowplow.runtime.syntax.foldable._
-import com.snowplowanalytics.snowplow.loaders.transform.{
-  BadRowsSerializer,
-  NonAtomicFields,
-  SchemaSubVersion,
-  TabledEntity,
-  Transform,
-  TypedTabledEntity
-}
+import com.snowplowanalytics.snowplow.loaders.transform.{BadRowsSerializer, NonAtomicFields, SchemaSubVersion, TabledEntity, Transform}
 
 object Processing {
 
@@ -60,12 +53,17 @@ object Processing {
       val eventProcessingConfig              = EventProcessingConfig(env.windowing, env.metrics.setLatency)
       val badProcessor                       = BadRowProcessor(env.appInfo.name, env.appInfo.version)
 
-      Stream.eval(WindowState.factory[F]).flatMap { windowStateFactory =>
+      val resources = for {
+        windowStateFactory <- WindowState.factory[F]
+        superset <- Ref[F].of(Map.empty: EntitySuperset.Superset)
+      } yield (windowStateFactory, superset)
+
+      Stream.eval(resources).flatMap { case (windowStateFactory, superset) =>
         env.source
           .decompressedStream(
             eventProcessingConfig,
             env.decompression,
-            eventProcessor(env, badProcessor, deferredTableExists.get, windowStateFactory),
+            eventProcessor(env, badProcessor, deferredTableExists.get, windowStateFactory, superset),
             badProcessor,
             toBadRow(badProcessor)
           )
@@ -103,7 +101,8 @@ object Processing {
     env: Environment[F],
     badProcessor: BadRowProcessor,
     deferredTableExists: F[Unit],
-    windowStateFactory: WindowState.Factory[F]
+    windowStateFactory: WindowState.Factory[F],
+    superset: Ref[F, EntitySuperset.Superset]
   ): DecompressedEventProcessor[F] = { in =>
     val resources = for {
       windowState <- Stream.eval(windowStateFactory.build)
@@ -113,7 +112,7 @@ object Processing {
     } yield stateRef
 
     resources.flatMap { stateRef =>
-      in.through(processBatches(env, badProcessor, stateRef))
+      in.through(processBatches(env, badProcessor, stateRef, superset))
         .append(finalizeWindow(env, stateRef))
     }
   }
@@ -167,26 +166,42 @@ object Processing {
   private def processBatches[F[_]: Async: RegistryLookup](
     env: Environment[F],
     badProcessor: BadRowProcessor,
-    ref: Ref[F, WindowState]
+    ref: Ref[F, WindowState],
+    superset: Ref[F, EntitySuperset.Superset]
   ): Pipe[F, DecompressedTokenedEvents, Nothing] =
     _.through(rememberTokens(ref))
       .through(incrementReceivedCount(env))
       .through(parseBytes(env, badProcessor))
       .through(BatchUp.noTimeout(env.inMemBatchBytes))
-      .through(transformBatch(env, badProcessor, ref))
+      .through(transformBatch(env, badProcessor, ref, superset))
 
+  /**
+   * A batch records its columns only when it yields rows: a batch with no rows is never staged, so
+   * its columns are not in the view that `prepareCommit` selects from.
+   */
   private def transformBatch[F[_]: RegistryLookup: Async](
     env: Environment[F],
     badProcessor: BadRowProcessor,
-    ref: Ref[F, WindowState]
+    ref: Ref[F, WindowState],
+    superset: Ref[F, EntitySuperset.Superset]
   ): Pipe[F, Batched, Nothing] =
     _.parEvalMapUnordered(env.cpuParallelism) { case Batched(events, entities, _, earliestCollectorTstamp) =>
       for {
         _ <- Logger[F].debug(s"Processing batch of size ${events.size}")
-        resolveTypesResult <- NonAtomicFields.resolveTypes[F](env.resolver, entities, env.schemasToSkip)
-        nonAtomicFields <- possiblyExitOnClashingIgluSchemas(env, resolveTypesResult)
+        window <- ref.get.map(_.id)
+        resolveResult <- EntitySuperset.resolve[F](
+                           NonAtomicFields.resolveTypes[F](env.resolver, _, env.schemasToSkip),
+                           env.schemasToSkip,
+                           superset,
+                           env.entitySupersetCapacity,
+                           window,
+                           entities
+                         )
+        resolved <- possiblyExitOnClashingIgluSchemas(env, resolveResult)
+        nonAtomicFields = resolved.result
+        _ <- env.metrics.setEntitySupersetEntries(resolved.size.toLong)
+        _ <- resolved.displaced.traverse_(logDisplacement(env, _))
         _ <- possiblyExitOnMissingIgluSchema(env, nonAtomicFields)
-        _ <- rememberColumnNames(ref, nonAtomicFields.fields)
         (bad, rows) <- transformToSpark[F](badProcessor, events, nonAtomicFields)
         _ <- sendFailedEvents(env, badProcessor, bad)
         batchEventNameCounts <- Sync[F].delay(countEventNames(events))
@@ -195,12 +210,42 @@ object Processing {
                          s.copy(
                            numEvents               = s.numEvents + rows.size,
                            eventNameCounts         = s.eventNameCounts |+| batchEventNameCounts,
-                           earliestCollectorTstamp = updatedCollectorTstamp
+                           earliestCollectorTstamp = updatedCollectorTstamp,
+                           notStored               = s.notStored ++ resolved.notStored,
+                           nonAtomicColumnNames =
+                             if (rows.nonEmpty) s.nonAtomicColumnNames ++ resolved.columnNames else s.nonAtomicColumnNames
                          )
                        }
         _ <- sinkTransformedBatch(env, windowState, rows, SparkSchema.forBatch(nonAtomicFields.fields, env.respectIgluNullability))
       } yield ()
     }.drain
+
+  private def schemaFamily(te: TabledEntity): String = {
+    val kind = te.entityType match {
+      case TabledEntity.UnstructEvent => "unstruct event"
+      case TabledEntity.Context       => "context"
+    }
+    s"$kind iglu:${te.vendor}/${te.schemaName}/jsonschema/${te.model}-*-*"
+  }
+
+  private def logDisplacement[F[_]: Sync](env: Environment[F], d: EntitySuperset.Displacement): F[Unit] =
+    Logger[F].info(
+      s"The ${schemaFamily(d.replacement)} took the place of the ${schemaFamily(d.removed)}, last seen in window " +
+        s"${WindowState.viewName(d.lastSeen)}, in the set of ${env.entitySupersetCapacity} schemas the loader keeps in every " +
+        s"batch's column layout. Events were loaded normally. Each replacement changes every batch's column layout, so Spark " +
+        s"compiles new code, which costs CPU. If these messages persist, raise entitySupersetCapacity."
+    )
+
+  private def warnOfNotStored[F[_]: Sync](env: Environment[F], state: WindowState): F[Unit] =
+    Logger[F]
+      .warn(
+        s"In window ${state.viewName}, events with these schemas did not fit in the set of " +
+          s"${env.entitySupersetCapacity} schemas the loader keeps in every batch's column layout, because every schema in " +
+          s"it was in use: [${state.notStored.toList.map(schemaFamily).sorted.mkString(",")}]. Their events were loaded " +
+          s"normally. Spark compiled extra code, which costs CPU, for the first batch with each combination of these schemas, " +
+          s"and later batches with the same combination reused it. If this warning persists, raise entitySupersetCapacity."
+      )
+      .whenA(state.notStored.nonEmpty)
 
   private def sinkTransformedBatch[F[_]: Sync](
     env: Environment[F],
@@ -250,13 +295,6 @@ object Processing {
     _.evalTap { batch =>
       env.metrics.addReceived(batch.payloads.size.toLong + batch.bad.size.toLong)
     }
-
-  private def rememberColumnNames[F[_]](ref: Ref[F, WindowState], fields: Vector[TypedTabledEntity]): F[Unit] = {
-    val colNames = fields.flatMap { typedTabledEntity =>
-      typedTabledEntity.mergedField.name :: typedTabledEntity.recoveries.map(_._2.name)
-    }.toSet
-    ref.update(state => state.copy(nonAtomicColumnNames = state.nonAtomicColumnNames ++ colNames))
-  }
 
   private def parseBytes[F[_]: Async](
     env: Environment[F],
@@ -333,7 +371,7 @@ object Processing {
         for {
           _ <- Logger[F].info(s"Window ${state.viewName} ready to write and commit ${state.numEvents} events to the lake.")
           _ <- Logger[F].info(s"Non atomic columns: [${state.nonAtomicColumnNames.toSeq.sorted.mkString(",")}]")
-          _ <- env.lakeWriter.prepareCommit(state.viewName, state.eventNameCounts)
+          _ <- env.lakeWriter.prepareCommit(state.viewName, state.eventNameCounts, state.nonAtomicColumnNames)
           _ <- env.lakeWriter.commit(state.viewName)
           now <- Sync[F].realTime
           _ <- Logger[F].info(s"Window ${state.viewName} finished writing and committing ${state.numEvents} events to the lake.")
@@ -353,7 +391,7 @@ object Processing {
       } else
         Logger[F].info(s"Window ${state.viewName} yielded zero good events.  Nothing will be written into the lake.")
 
-      Stream.eval(commit) >> Stream.emits(state.tokens.reverse)
+      Stream.eval(commit *> warnOfNotStored(env, state)) >> Stream.emits(state.tokens.reverse)
     }
 
   private def possiblyExitOnMissingIgluSchema[F[_]: Sync](env: Environment[F], nonAtomicFields: NonAtomicFields.Result): F[Unit] =
@@ -368,8 +406,8 @@ object Processing {
 
   private def possiblyExitOnClashingIgluSchemas[F[_]: Sync](
     env: Environment[F],
-    resolveTypesResult: Either[NonAtomicFields.ResolveTypesException, NonAtomicFields.Result]
-  ): F[NonAtomicFields.Result] =
+    resolveTypesResult: Either[NonAtomicFields.ResolveTypesException, EntitySuperset.Resolved]
+  ): F[EntitySuperset.Resolved] =
     resolveTypesResult match {
       case Left(e) =>
         Logger[F].error(e.getMessage) *> env.appHealth.beUnhealthyForRuntimeService(RuntimeService.Iglu) *> Sync[F].raiseError(e)

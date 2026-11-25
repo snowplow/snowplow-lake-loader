@@ -33,6 +33,7 @@ trait Metrics[F[_]] {
   def setStorageMemoryBytes(bytes: Long): F[Unit]
   def setStorageDiskBytes(bytes: Long): F[Unit]
   def setDiskBytes(bytes: Long): F[Unit]
+  def setEntitySupersetEntries(count: Long): F[Unit]
 
   def scrape: F[String]
   def report: Stream[F, Nothing]
@@ -62,6 +63,7 @@ object Metrics {
         e2eLatencyTimer <- entries.timer("e2e_latency", windowing, PrometheusAndStatsd)
         tableDataFilesGauge <- entries.gauge("table_data_files_total", PrometheusAndStatsd)
         tableSnapshotsGauge <- entries.gauge("table_snapshots_retained", PrometheusAndStatsd)
+        entitySupersetEntriesGauge <- entries.gauge("entity_superset_entries", PrometheusOnly)
         // Prefixed, unlike the metrics above, because these report on Spark's internal state rather
         // than on anything in the loader's own domain. They are prometheus-only, so they are absent
         // from statsd and from the periodic stdout report, and are seen only by scraping /metrics.
@@ -82,6 +84,7 @@ object Metrics {
         def setStorageMemoryBytes(bytes: Long): F[Unit]            = storageMemoryBytesGauge.set(bytes)
         def setStorageDiskBytes(bytes: Long): F[Unit]              = storageDiskBytesGauge.set(bytes)
         def setDiskBytes(bytes: Long): F[Unit]                     = diskBytesGauge.set(bytes)
+        def setEntitySupersetEntries(count: Long): F[Unit]         = entitySupersetEntriesGauge.set(count)
 
         def scrape: F[String]          = entries.scrape
         def report: Stream[F, Nothing] = entries.report

@@ -38,9 +38,8 @@ abstract class LoaderApp[FactoryConfig: Decoder, SourceConfig: Decoder, SinkConf
   type FactoryProvider = FactoryConfig => Resource[IO, Factory[IO, SourceConfig, SinkConfig]]
 
   def toFactory: FactoryProvider
-  def isDestinationSetupError: DestinationSetupErrorCheck
 
-  final def main: Opts[IO[ExitCode]] = Run.fromCli(info, toFactory, isDestinationSetupError)
+  final def main: Opts[IO[ExitCode]] = Run.fromCli(info, toFactory, DestinationSetupError.check)
 
 }
 

@@ -305,18 +305,30 @@ private[processing] object SparkUtils {
     Sync[F].blocking(SnowplowInternalSparkBridge.localDiskBytes(spark))
 
   /**
-   * The window's events, repartitioned for the writers.
+   * The window's events, narrowed to the window's own columns and repartitioned for the writers.
+   *
+   * Every batch is staged padded to `EntitySuperset`, so the view holds columns this window's
+   * events never used. Selecting before the repartition keeps them out of the shuffle.
    *
    * Deliberately does not assign `load_tstamp`; `readFinalDataFrame` does, and says why.
+   *
+   * @param nonAtomicColumnNames
+   *   Every one must be in the view.
    */
   def prepareFinalDataFrame[F[_]: Sync](
     spark: SparkSession,
     viewName: String,
+    nonAtomicColumnNames: Set[String],
     writerParallelism: Int,
     writerPartitioning: Config.WriterPartitioning,
     eventNameCounts: Map[Option[String], Int]
   ): F[DataFrame] =
-    Sync[F].delay(spark.table(viewName)).flatMap(repartitionForWriting(_, writerParallelism, writerPartitioning, eventNameCounts))
+    Sync[F]
+      .delay(selectWindowColumns(spark.table(viewName), nonAtomicColumnNames))
+      .flatMap(repartitionForWriting(_, writerParallelism, writerPartitioning, eventNameCounts))
+
+  private def selectWindowColumns(df: DataFrame, nonAtomicColumnNames: Set[String]): DataFrame =
+    df.select((SparkSchema.atomic.map(_.name) ++ nonAtomicColumnNames.toVector.sorted).map(df.col): _*)
 
   /**
    * Redistributes the accumulated window into the partitions that will be written to the lake.

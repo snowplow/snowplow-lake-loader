@@ -29,9 +29,9 @@ import java.util.concurrent.TimeUnit
  *
  * To enable STS, the spark configuration must contain four parameters:
  *   - "fs.s3a.assumed.role.session.name": The AWS iam session name. A default is provided in
- *     application.conf.
+ *     reference.conf.
  *   - "fs.s3a.assumed.role.session.duration": The AWS iam session duration. A default is provided
- *     in application.conf.
+ *     in reference.conf.
  *   - "fs.s3a.assumed.role.arn": ARN of the AWS role to assume.
  *   - "fs.s3a.assumed.role.session.external.id": External ID to provide when assuming the role.
  *

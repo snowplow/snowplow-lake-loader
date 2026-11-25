@@ -18,6 +18,7 @@ import cats.effect.testkit.TestControl
 
 import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData}
 import com.snowplowanalytics.snowplow.analytics.scalasdk.SnowplowEvent
+import com.snowplowanalytics.snowplow.loaders.transform.NonAtomicFields
 import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.{MockEnvironment, RuntimeService}
 import com.snowplowanalytics.snowplow.lakes.MockEnvironment.Action
@@ -44,6 +45,10 @@ class ProcessingSpec extends Specification with CatsEffect {
     Still release the window when reporting a spark usage metric fails $e16
     Not report the storage gauges for a window that took no measurement $e17
     Accumulate the window's event_name histogram across batches and hand it to the commit $e18
+    Reject only the new version's events when a known-good version of the entity is in the superset $e19
+    Crash and exit for clashing schemas seen in different windows $e20
+    Hand the commit only the columns the window's own events used $e21
+    Report the number of entries in the entity superset $e22
   """
 
   def e1 = {
@@ -304,7 +309,7 @@ class ProcessingSpec extends Specification with CatsEffect {
         Action.InitializedLocalDataFrame("v0000000001"),
         Action.AddedReceivedCountMetric(2),
         Action.AppendedRowsToDataFrame("v0000000001", 2),
-        Action.PreparedCommit("v0000000001", Map(None -> 2)),
+        Action.PreparedCommit("v0000000001", Map(None -> 2), Set("unstruct_event_myvendor_goodschema_7")),
         Action.CommittedToTheLake("v0000000001"),
         Action.AddedCommittedCountMetric(2),
         Action.SetProcessingLatencyMetric(MockEnvironment.WindowDuration + MockEnvironment.TimeTakenToCreateTable),
@@ -625,8 +630,8 @@ class ProcessingSpec extends Specification with CatsEffect {
     TestControl.executeEmbed(io)
   }
 
-  // getDiskBytes is the one reading that can fail in production, and withHandledErrors turns
-  // that into a None. Rewriting Processing's `fold` as a `getOrElse(0L)` would publish a 0 that
+  // getDiskBytes is the one reading that can fail in production, and the LakeWriter turns that
+  // into a None. Rewriting Processing's `fold` as a `getOrElse(0L)` would publish a 0 that
   // reads as plenty of free disk, and every other example would still pass.
   def e15 = {
     val io = for {
@@ -692,6 +697,113 @@ class ProcessingSpec extends Specification with CatsEffect {
     } yield (state must contain(Action.PreparedCommit("v0000000001", expected))) and
       (expected.values.sum must_== 8) and
       (state must contain(Action.AddedCommittedCountMetric(8)))
+
+    TestControl.executeEmbed(io)
+  }
+
+  /** An event with the given unstructured event, versioned within `myvendor/goodschema` 7-*-* */
+  private def goodSchemaUe(addition: Int): SnowplowEvent.UnstructEvent =
+    SnowplowEvent.UnstructEvent(
+      Some(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodschema", "jsonschema", SchemaVer.Full(7, 0, addition)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+
+  private def clashingContext(vendor: String, name: String): SnowplowEvent.Contexts =
+    SnowplowEvent.Contexts(
+      List(
+        SelfDescribingData(
+          SchemaKey(vendor, name, "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+
+  /**
+   * Window 1 puts 7-0-0 in the superset. Window 2 has a batch of 7-0-0 alongside 7-0-9, which is
+   * not in the registry. With 7-0-0 known to be good, only the 7-0-9 event becomes a bad row and
+   * the 7-0-0 event in the same batch loads.
+   */
+  def e19 = {
+    val io = for {
+      window1 <- EventUtils.good(ue = goodSchemaUe(0)).flatMap(_.tokened)
+      known <- EventUtils.good(ue = goodSchemaUe(0)).flatMap(_.tokened)
+      broken <- EventUtils.good(ue = goodSchemaUe(9)).flatMap(_.tokened)
+      control <- MockEnvironment.build(List(List(window1), List(known, broken)))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield {
+      val window2 = state.dropWhile {
+        case Action.InitializedLocalDataFrame("v0000000002") => false
+        case _                                               => true
+      }
+      (window2 must contain(Action.SentToBad(1))) and
+        (window2 must contain(Action.AppendedRowsToDataFrame("v0000000002", 3))) and
+        (window2 must contain(Action.PreparedCommit("v0000000002", Map(None -> 4), Set("unstruct_event_myvendor_goodschema_7")))) and
+        (window2 must contain(Action.AddedCommittedCountMetric(3)))
+    }
+
+    TestControl.executeEmbed(io)
+  }
+
+  /**
+   * The clashing pair in different windows, so never in one batch. The loader still crashes on the
+   * second, because by then the superset holds both.
+   */
+  def e20 = {
+    val io = for {
+      window1 <- EventUtils.good(contexts = clashingContext("clashing.a", "b_c")).flatMap(_.tokened)
+      window2 <- EventUtils.good(contexts = clashingContext("clashing", "a_b_c")).flatMap(_.tokened)
+      control <- MockEnvironment.build(List(List(window1), List(window2)))
+      result <- Processing.stream(control.environment).compile.drain.attempt
+      state <- control.state.get
+    } yield (result.left.toOption.collect { case e: NonAtomicFields.ResolveTypesException.ClashingFieldNames =>
+      e.fieldsWithSameNames.map(_.map(te => s"${te.vendor}.${te.schemaName}"))
+    } must beEqualTo(Option(Set(Set("clashing.a.b_c", "clashing.a_b_c"))))) and
+      (state must contain(Action.CommittedToTheLake("v0000000001"))) and
+      (state must contain(Action.BecameUnhealthy(RuntimeService.Iglu))) and
+      (state must not(contain(Action.CommittedToTheLake("v0000000002"))))
+
+    TestControl.executeEmbed(io)
+  }
+
+  /**
+   * Window 2's batch is padded with window 1's entity, but its events never use it, so the commit
+   * must not be handed that column.
+   */
+  def e21 = {
+    val goodContext = SnowplowEvent.Contexts(
+      List(
+        SelfDescribingData(
+          SchemaKey("myvendor", "goodcontext", "jsonschema", SchemaVer.Full(1, 0, 0)),
+          Json.obj("col_a" -> Json.fromString("xyz"))
+        )
+      )
+    )
+    val io = for {
+      window1 <- EventUtils.good(ue = goodSchemaUe(0)).flatMap(_.tokened)
+      window2 <- EventUtils.good(contexts = goodContext).flatMap(_.tokened)
+      control <- MockEnvironment.build(List(List(window1), List(window2)))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield (state must contain(Action.PreparedCommit("v0000000001", Map(None -> 2), Set("unstruct_event_myvendor_goodschema_7")))) and
+      (state must contain(Action.PreparedCommit("v0000000002", Map(None -> 2), Set("contexts_myvendor_goodcontext_1"))))
+
+    TestControl.executeEmbed(io)
+  }
+
+  /** One entry after a first window, two after a second window that brings another entity. */
+  def e22 = {
+    val io = for {
+      first <- EventUtils.good(ue = goodSchemaUe(0)).flatMap(_.tokened)
+      second <- EventUtils.good(contexts = clashingContext("clashing.a", "b_c")).flatMap(_.tokened)
+      control <- MockEnvironment.build(List(List(first), List(second)))
+      _ <- Processing.stream(control.environment).compile.drain
+      readings <- control.supersetEntries.get
+    } yield readings must beEqualTo(Vector(1L, 2L))
 
     TestControl.executeEmbed(io)
   }

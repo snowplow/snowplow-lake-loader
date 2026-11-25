@@ -22,7 +22,9 @@ import org.apache.spark.sql.SnowplowInternalSparkBridge.MaterializedShuffle
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
 
-import com.snowplowanalytics.snowplow.runtime.{AppHealth, Retrying}
+import java.util.UUID
+
+import com.snowplowanalytics.snowplow.runtime.AppHealth
 import com.snowplowanalytics.snowplow.lakes.{Alert, Config, DestinationSetupErrorCheck, RuntimeService}
 import com.snowplowanalytics.snowplow.lakes.tables.{DeltaWriter, IcebergWriter, Writer}
 
@@ -87,8 +89,14 @@ trait LakeWriter[F[_]] {
    *   The window's event-name histogram, keyed by the column's value so that `None` is the events
    *   with no `event_name`. Decides how the repartition spreads the window over the writer's
    *   partitions. See `WriterPartitioner`.
+   * @param nonAtomicColumnNames
+   *   The non-atomic columns written to the lake. The view can hold more.
    */
-  def prepareCommit(viewName: String, eventNameCounts: Map[Option[String], Int]): F[Unit]
+  def prepareCommit(
+    viewName: String,
+    eventNameCounts: Map[Option[String], Int],
+    nonAtomicColumnNames: Set[String]
+  ): F[Unit]
 
   /**
    * Commit the window by writing it into the lake.
@@ -97,6 +105,9 @@ trait LakeWriter[F[_]] {
    * `commit` without it writes rows that were never repartitioned. Assigns `load_tstamp` as it
    * reads, so a retried commit stamps its rows with the time of the attempt that succeeds rather
    * than the time the window was prepared.
+   *
+   * Retries until the write succeeds or the retries run out, and a retry first checks whether the
+   * failed attempt landed after all - `RemoteTable` and `Writer.write` have the detail.
    */
   def commit(viewName: String): F[Unit]
 
@@ -193,10 +204,10 @@ trait LakeWriter[F[_]] {
    *
    * `None` means the read failed, not that the figure is unavailable - unlike the table metrics
    * above, whose `None` is the table format declining to report one, this figure always exists. It
-   * is optional only so `withHandledErrors` can drop a failed read instead of failing the window
-   * over a metric, which leaves the gauge holding its last good value rather than replacing it with
-   * a 0 that reads as plenty of free disk. A push-backed gauge starts at 0 regardless, so this
-   * preserves a reading once there has been one but cannot express "never measured".
+   * is optional only so a failed read can be dropped instead of failing the window over a metric,
+   * which leaves the gauge holding its last good value rather than replacing it with a 0 that reads
+   * as plenty of free disk. A push-backed gauge starts at 0 regardless, so this preserves a reading
+   * once there has been one but cannot express "never measured".
    */
   def getDiskBytes: F[Option[Long]]
 
@@ -221,8 +232,6 @@ object LakeWriter {
 
   private implicit def logger[F[_]: Sync]: Logger[F] = Slf4jLogger.getLogger[F]
 
-  trait WithHandledErrors[F[_]] extends LakeWriter[F]
-
   /** What the block manager is holding, in bytes, split by where it is holding it. */
   final case class BlockManagerUsage(memoryBytes: Long, diskBytes: Long)
 
@@ -238,7 +247,10 @@ object LakeWriter {
     config: Config.Spark,
     target: Config.Target,
     respectIgluNullability: Boolean,
-    cores: Int
+    cores: Int,
+    appHealth: AppHealth.Interface[F, Alert, RuntimeService],
+    retries: Config.Retries,
+    destinationSetupErrorCheck: DestinationSetupErrorCheck
   ): Resource[F, LakeWriter[F]] = {
     val w = target match {
       case c: Config.Delta   => new DeltaWriter(c)
@@ -251,102 +263,65 @@ object LakeWriter {
       session <- SparkUtils.session[F](config, w, target, cores)
       stageOffHeap <- Resource.eval(SparkUtils.stageBatchesOffHeap[F](session))
       writerParallelism = chooseWriterParallelism(cores)
-      mutex1 <- Resource.eval(Mutex[F])
-      mutex2 <- Resource.eval(Mutex[F])
+      processId <- Resource.eval(Sync[F].delay(UUID.randomUUID))
+      _ <- Resource.eval(logProcessId(target, processId))
+      remoteTable <- Resource.eval(RemoteTable.build(attempts(session, w, processId), appHealth, retries, destinationSetupErrorCheck))
+      mutexForLocalAppending <- Resource.eval(Mutex[F])
       windowResources <- Resource.eval(Ref[F].of(Map.empty[String, WindowResources]))
     } yield impl(
       session,
-      w,
+      remoteTable,
       writerParallelism,
       config.writerPartitioning,
       shouldRestoreNullability,
       stageOffHeap,
-      mutex1,
-      mutex2,
+      mutexForLocalAppending,
       windowResources
     )
   }
 
-  def withHandledErrors[F[_]: Async](
-    underlying: LakeWriter[F],
-    appHealth: AppHealth.Interface[F, Alert, RuntimeService],
-    retries: Config.Retries,
-    destinationSetupErrorCheck: DestinationSetupErrorCheck
-  ): WithHandledErrors[F] = new WithHandledErrors[F] {
-    def createTable: F[Unit] =
-      Retrying.withRetries(
-        appHealth,
-        retries.transientErrors,
-        retries.setupErrors,
-        RuntimeService.SparkWriter,
-        Alert.FailedToCreateEventsTable,
-        destinationSetupErrorCheck
-      ) { _ =>
-        underlying.createTable
-      } <* appHealth.beHealthyForSetup
+  /**
+   * Logged so that a tagged snapshot can be traced back to the pod and run that wrote it. Delta
+   * tags nothing.
+   */
+  private def logProcessId[F[_]: Sync](target: Config.Target, processId: UUID): F[Unit] =
+    target match {
+      case _: Config.Iceberg =>
+        Logger[F].info(s"This process tags its Iceberg commits with $processId, in the snapshot property ${IcebergWriter.windowIdProperty}")
+      case _: Config.Delta =>
+        Sync[F].unit
+    }
 
-    def initializeLocalDataFrame(viewName: String): F[Unit] =
-      underlying.initializeLocalDataFrame(viewName)
+  private def attempts[F[_]: Sync](
+    spark: SparkSession,
+    w: Writer,
+    processId: UUID
+  ): RemoteTable.Attempts[F] = new RemoteTable.Attempts[F] {
+    def create: F[Unit] =
+      w.prepareTable(spark, processId) *> logTableDescription
 
-    def localAppendRows(
-      viewName: String,
-      rows: NonEmptyList[Row],
-      schema: StructType
-    ): F[Unit] =
-      underlying.localAppendRows(viewName, rows, schema)
+    /**
+     * Swallows its errors, because `RemoteTable` would otherwise retry `create` and raise
+     * `FailedToCreateEventsTable` over a log line.
+     */
+    private def logTableDescription: F[Unit] =
+      w.describeTable(spark)
+        .flatMap(_.traverse_(Logger[F].info(_)))
+        .handleErrorWith { e =>
+          Logger[F].warn(e)("Could not read the table's properties for logging")
+        }
 
-    def removeDataFrameFromDisk(viewName: String): F[Unit] =
-      underlying.removeDataFrameFromDisk(viewName)
-
-    // Nothing `prepareCommit` does touches the lake, so nothing it raises can be triaged as a
-    // customer setup error. Wrapping it would alert customers about failures they cannot act on,
-    // and its success would clear the setup-healthy flag on no evidence about the destination at
-    // all - hence unwrapped, unlike `commit` below.
-    // Dropping the retries with it is deliberate rather than a side effect. Spark has already
-    // retried the shuffle's tasks `spark.taskRetries` times, and a retry here would resubmit the
-    // whole map stage rather than the task that failed. Nothing is acked before `commit`, so the
-    // window is re-consumed on restart.
-    def prepareCommit(viewName: String, eventNameCounts: Map[Option[String], Int]): F[Unit] =
-      underlying.prepareCommit(viewName, eventNameCounts)
-
-    def commit(viewName: String): F[Unit] =
-      Retrying.withRetries(
-        appHealth,
-        retries.transientErrors,
-        retries.setupErrors,
-        RuntimeService.SparkWriter,
-        Alert.FailedToCommitToLake,
-        destinationSetupErrorCheck
-      ) { _ =>
-        underlying.commit(viewName)
-      } <* appHealth.beHealthyForSetup
+    // `readFinalDataFrame` stays inside the attempt, so each attempt assigns its own `load_tstamp`.
+    def attemptCommit(viewName: String, isRetry: Boolean): F[Unit] =
+      SparkUtils.readFinalDataFrame(spark, viewName).flatMap { df =>
+        w.write(df, Writer.WindowId(processId, viewName), isRetry)
+      }
 
     def getTableDataFilesTotal: F[Option[Long]] =
-      underlying.getTableDataFilesTotal.handleErrorWith { e =>
-        Logger[F].warn(e)("Failed to get table_data_files_total metric").as(None)
-      }
+      w.getTableDataFilesTotal(spark)
 
     def getTableSnapshotsRetained: F[Option[Long]] =
-      underlying.getTableSnapshotsRetained.handleErrorWith { e =>
-        Logger[F].warn(e)("Failed to get table_snapshots_retained metric").as(None)
-      }
-
-    // `getDiskBytes` is the only one wrapped here. `getShuffleDiskBytes` and `getStorageUsage`
-    // read state the underlying writer already holds, and `recordBlockManagerPeak` does reach Spark
-    // but handles its own errors in `recordPeak`, because `prepareCommit` calls it too.
-    def getShuffleDiskBytes: F[Long] =
-      underlying.getShuffleDiskBytes
-
-    def getStorageUsage(viewName: String): F[Option[BlockManagerUsage]] =
-      underlying.getStorageUsage(viewName)
-
-    def getDiskBytes: F[Option[Long]] =
-      underlying.getDiskBytes.handleErrorWith { e =>
-        Logger[F].warn(e)("Failed to get spark_disk_bytes metric").as(None)
-      }
-
-    def recordBlockManagerPeak(viewName: String): F[Unit] =
-      underlying.recordBlockManagerPeak(viewName)
+      w.getTableSnapshotsRetained(spark)
   }
 
   /**
@@ -384,15 +359,9 @@ object LakeWriter {
   /**
    * Implementation of the LakeWriter
    *
-   * @param mutexForRemoteWriting
-   *   This mutex is needed because we allow overlapping windows. It prevents two different windows
-   *   from trying to run `w.write` - the remote write to Iceberg/Delta - at the same time. It
-   *   deliberately does not cover `prepareCommit`'s repartition and shuffle. Holding it over those
-   *   would leave the next window's `prepareCommit` queued behind this window's write with its
-   *   staged blocks still resident, which is the cost the split exists to avoid. So under the lag
-   *   condition described in CLAUDE.md's "Windows overlap" section, window N+1's shuffle can run
-   *   concurrently with window N's write. Nothing is staging while that is true: at most two
-   *   windows are open, and under lag those two are the ones finalizing.
+   * @param remoteTable
+   *   Everything that reaches the lake. It holds the mutex that keeps two windows from writing to
+   *   the table at once.
    * @param mutexForLocalAppending
    *   This mutex is needed because `SparkUtils.appendStagedBatch` would otherwise have a race
    *   condition: It fetches a saved dataframe by name, modifies it, and re-saves the dataframe by
@@ -412,28 +381,16 @@ object LakeWriter {
    */
   private def impl[F[_]: Sync](
     spark: SparkSession,
-    w: Writer,
+    remoteTable: RemoteTable[F],
     writerParallelism: Int,
     writerPartitioning: Config.WriterPartitioning,
     shouldRestoreNullability: Boolean,
     stageOffHeap: Boolean,
-    mutexForRemoteWriting: Mutex[F],
     mutexForLocalAppending: Mutex[F],
     windowResources: Ref[F, Map[String, WindowResources]]
   ): LakeWriter[F] = new LakeWriter[F] {
     def createTable: F[Unit] =
-      w.prepareTable(spark) *> logTableDescription
-
-    /**
-     * Swallows its errors rather than leaving them to `withHandledErrors`, which would retry
-     * `createTable` and raise `FailedToCreateEventsTable` over a log line.
-     */
-    private def logTableDescription: F[Unit] =
-      w.describeTable(spark)
-        .flatMap(_.traverse_(Logger[F].info(_)))
-        .handleErrorWith { e =>
-          Logger[F].warn(e)("Could not read the table's properties for logging")
-        }
+      remoteTable.create
 
     def initializeLocalDataFrame(viewName: String): F[Unit] =
       SparkUtils.initializeLocalDataFrame(spark, viewName)
@@ -469,9 +426,14 @@ object LakeWriter {
         _ <- SparkUtils.dropView(spark, viewName, resources.checkpointed, resources.shuffle.map(_.id))
       } yield ()
 
-    def prepareCommit(viewName: String, eventNameCounts: Map[Option[String], Int]): F[Unit] =
+    def prepareCommit(
+      viewName: String,
+      eventNameCounts: Map[Option[String], Int],
+      nonAtomicColumnNames: Set[String]
+    ): F[Unit] =
       for {
-        df <- SparkUtils.prepareFinalDataFrame(spark, viewName, writerParallelism, writerPartitioning, eventNameCounts)
+        df <-
+          SparkUtils.prepareFinalDataFrame(spark, viewName, nonAtomicColumnNames, writerParallelism, writerPartitioning, eventNameCounts)
         shuffled <- SparkUtils.materializeShuffle(spark, df)
         // Only when there is a shuffle, because only then does the release below happen here. With
         // no shuffle the batches live on and `recordBlockManagerPeak` measures them at the drop.
@@ -501,17 +463,13 @@ object LakeWriter {
       } yield ()
 
     def commit(viewName: String): F[Unit] =
-      SparkUtils.readFinalDataFrame(spark, viewName).flatMap { df =>
-        mutexForRemoteWriting.lock.surround {
-          w.write(df)
-        }
-      }
+      remoteTable.commit(viewName)
 
     def getTableDataFilesTotal: F[Option[Long]] =
-      w.getTableDataFilesTotal(spark)
+      remoteTable.getTableDataFilesTotal
 
     def getTableSnapshotsRetained: F[Option[Long]] =
-      w.getTableSnapshotsRetained(spark)
+      remoteTable.getTableSnapshotsRetained
 
     def getShuffleDiskBytes: F[Long] =
       windowResources.get.map(_.values.flatMap(_.shuffle).map(_.diskBytes).sum)
@@ -520,7 +478,9 @@ object LakeWriter {
       windowResources.get.map(_.get(viewName).flatMap(_.blockManagerPeak))
 
     def getDiskBytes: F[Option[Long]] =
-      SparkUtils.localDiskBytes(spark).map(_.some)
+      SparkUtils.localDiskBytes(spark).map(_.some).handleErrorWith { e =>
+        Logger[F].warn(e)("Failed to get spark_disk_bytes metric").as(None)
+      }
 
     def recordBlockManagerPeak(viewName: String): F[Unit] =
       windowResources.get.flatMap { m =>

@@ -15,7 +15,7 @@ object Dependencies {
     object Spark {
 
       // A version of Spark which is compatible with the current version of Iceberg and Delta
-      val forIcebergDelta      = "4.1.3"
+      val forIcebergDelta      = "4.1.4"
       val forIcebergDeltaMinor = "4.1"
     }
 
@@ -27,36 +27,39 @@ object Dependencies {
     val betterMonadicFor = "0.3.1"
 
     // Spark
-    val delta              = "4.4.0"
-    val iceberg            = "1.11.0"
+    val delta              = "4.4.1"
+    val iceberg            = "1.12.0"
     val hadoop             = "3.5.0"
     val googleCloudStorage = "2.72.0"
 
     // java
-    val slf4j       = "2.0.18"
-    val azureSdk    = "1.18.6"
-    val awsSdk1     = "1.12.797"
-    val awsSdk2     = "2.54.18" // Match common-streams
-    val awsRegistry = "1.1.27"
+    val slf4j         = "2.0.18"
+    val azureSdk      = "1.18.6"
+    val azureDatalake = "12.26.3"
+    val awsSdk1       = "1.12.797"
+    val awsSdk2       = "2.54.18" // Match common-streams
+    val awsRegistry   = "1.1.27"
 
     // Snowplow
-    val streams    = "0.27.0"
-    val igluClient = "4.2.1"
+    val streams    = "0.27.1"
+    val igluClient = "4.3.0"
 
     // Transitive overrides
     val kafka      = "3.9.2"
-    val lz4        = "1.11.1"
+    val lz4        = "1.11.4"
     val log4jCore  = "2.25.5"
-    val jackson    = "2.21.6"
+    val jackson    = "2.22.3"
     val micrometer = "1.16.7"
     val netty      = "4.2.18.Final"
     // netty-tcnative has its own version scheme; it must match the tcnative.version pinned by
     // the netty-parent pom of V.netty, because netty-handler calls into it via JNI-bound statics.
     val nettyTcnative = "2.0.84.Final"
-    val bouncyCastle  = "1.85"
+    val bouncyCastle  = "1.86"
     val ivy           = "2.6.0"
     val reactor       = "3.8.7"
     val reactorNetty  = "1.3.7"
+    val snappy        = "1.1.10.9"
+    val guava         = "33.7.2-jre"
 
     // tests
     val specs2           = "4.20.0"
@@ -81,39 +84,40 @@ object Dependencies {
   val hadoopAzure   = "org.apache.hadoop"   % "hadoop-azure"                                           % V.hadoop
   val hadoopAws     = "org.apache.hadoop"   % "hadoop-aws"                                             % V.hadoop
   val hadoopGcp     = "org.apache.hadoop"   % "hadoop-gcp"                                             % V.hadoop
-  // Iceberg's ResolvingFileIO maps gs:// to GCSFileIO: iceberg-spark-runtime bundles that class
-  // but not the java-storage client behind it, which previously reached the classpath only as a
-  // transitive dependency of the removed bigdataoss gcsio. Also provides the plain exception
-  // classes GcpApp's triage matches for the Iceberg REST catalog path.
+  // The client behind Iceberg's GCSFileIO, and the plain exception classes DestinationSetupError
+  // matches on that path
   val googleCloudStorage = "com.google.cloud" % "google-cloud-storage" % V.googleCloudStorage
 
   // java
-  val slf4j         = "org.slf4j"              % "slf4j-simple"          % V.slf4j
-  val azureIdentity = "com.azure"              % "azure-identity"        % V.azureSdk
-  val awsGlue       = "software.amazon.awssdk" % "glue"                  % V.awsSdk2
-  val awsS3         = "software.amazon.awssdk" % "s3"                    % V.awsSdk2
-  val awsS3Transfer = "software.amazon.awssdk" % "s3-transfer-manager"   % V.awsSdk2
-  val awsSts        = "software.amazon.awssdk" % "sts"                   % V.awsSdk2
-  val awsKms        = "software.amazon.awssdk" % "kms"                   % V.awsSdk2
-  val dynamodbSdk1  = "com.amazonaws"          % "aws-java-sdk-dynamodb" % V.awsSdk1
-  val awsRegistry   = "software.amazon.glue"   % "schema-registry-serde" % V.awsRegistry
-  // Iceberg's HttpClientProperties defaults http-client.type to "apache", which reflectively loads
-  // ApacheHttpClientConfigurations -> software.amazon.awssdk.http.apache.ApacheHttpClient. Since
-  // the 2.44 -> 2.54 bump the awssdk services parent pom ships apache5-client at runtime scope
-  // instead, so apache-client has to be asked for explicitly or Iceberg's Glue/S3 client factories
-  // fail with NoClassDefFoundError.
+  val slf4j         = "org.slf4j"              % "slf4j-simple"                % V.slf4j
+  val azureIdentity = "com.azure"              % "azure-identity"              % V.azureSdk
+  val azureDatalake = "com.azure"              % "azure-storage-file-datalake" % V.azureDatalake
+  val awsGlue       = "software.amazon.awssdk" % "glue"                        % V.awsSdk2
+  val awsS3         = "software.amazon.awssdk" % "s3"                          % V.awsSdk2
+  val awsS3Transfer = "software.amazon.awssdk" % "s3-transfer-manager"         % V.awsSdk2
+  val awsSts        = "software.amazon.awssdk" % "sts"                         % V.awsSdk2
+  val awsKms        = "software.amazon.awssdk" % "kms"                         % V.awsSdk2
+  val dynamodbSdk1  = "com.amazonaws"          % "aws-java-sdk-dynamodb"       % V.awsSdk1
+  val awsRegistry   = "software.amazon.glue"   % "schema-registry-serde"       % V.awsRegistry
+  // S3A in hadoop-aws builds the AWS SDK's HttpClient 4 client, which it would otherwise get from
+  // the SDK bundle excluded from hadoopAws below. The SDK's own poms ship only the HttpClient 5
+  // client at runtime, which is the one Iceberg's S3, Glue and KMS clients use.
   val awsApacheClient = "software.amazon.awssdk" % "apache-client" % V.awsSdk2
 
   // transitive overrides
-  val kafkaClients      = "org.apache.kafka"           % "kafka-clients"              % V.kafka
-  val lz4               = "at.yawk.lz4"                % "lz4-java"                   % V.lz4
-  val log4jCore         = "org.apache.logging.log4j"   % "log4j-core"                 % V.log4jCore
-  val log4jTemplateJson = "org.apache.logging.log4j"   % "log4j-layout-template-json" % V.log4jCore
-  val jacksonDatabind   = "com.fasterxml.jackson.core" % "jackson-databind"           % V.jackson
-  val micrometer        = "io.micrometer"              % "micrometer-core"            % V.micrometer
-  val ivy               = "org.apache.ivy"             % "ivy"                        % V.ivy
-  val reactorCore       = "io.projectreactor"          % "reactor-core"               % V.reactor
-  val reactorNettyHttp  = "io.projectreactor.netty"    % "reactor-netty-http"         % V.reactorNetty
+  val kafkaClients       = "org.apache.kafka"              % "kafka-clients"              % V.kafka
+  val lz4                = "at.yawk.lz4"                   % "lz4-java"                   % V.lz4
+  val log4jCore          = "org.apache.logging.log4j"      % "log4j-core"                 % V.log4jCore
+  val log4jTemplateJson  = "org.apache.logging.log4j"      % "log4j-layout-template-json" % V.log4jCore
+  val log4j12Api         = "org.apache.logging.log4j"      % "log4j-1.2-api"              % V.log4jCore
+  val jacksonDatabind    = "com.fasterxml.jackson.core"    % "jackson-databind"           % V.jackson
+  val jacksonModuleScala = "com.fasterxml.jackson.module" %% "jackson-module-scala"       % V.jackson
+  val micrometer         = "io.micrometer"                 % "micrometer-core"            % V.micrometer
+  val ivy                = "org.apache.ivy"                % "ivy"                        % V.ivy
+  val reactorCore        = "io.projectreactor"             % "reactor-core"               % V.reactor
+  val reactorNettyHttp   = "io.projectreactor.netty"       % "reactor-netty-http"         % V.reactorNetty
+  val snappy             = "org.xerial.snappy"             % "snappy-java"                % V.snappy
+  val guava              = "com.google.guava"              % "guava"                      % V.guava
 
   // Spark pulls Netty's aggregator netty-all, which has a non-optional dependency on a
   // vulnerable bcprov-jdk18on 1.80; pin it to a patched version.
@@ -183,6 +187,29 @@ object Dependencies {
     micrometer % Runtime
   )
 
+  // Every image can write to every store, whichever cloud it is named for
+  val storageDependencies = Seq(
+    // S3
+    hadoopAws.exclude("software.amazon.awssdk", "bundle"),
+    awsS3,
+    awsGlue,
+    awsSts,
+    dynamodbSdk1,
+    awsKms          % Runtime,
+    awsApacheClient % Runtime,
+    deltaDynamodb   % Runtime,
+    awsS3Transfer   % Runtime,
+    // ABFS
+    azureIdentity,
+    azureDatalake,
+    hadoopAzure,
+    reactorCore,
+    reactorNettyHttp,
+    // GCS
+    hadoopGcp,
+    googleCloudStorage
+  )
+
   val coreDependencies = Seq(
     streamsCore,
     loaders,
@@ -198,43 +225,31 @@ object Dependencies {
     lz4,
     log4jCore,
     log4jTemplateJson,
+    log4j12Api,
     jacksonDatabind,
+    jacksonModuleScala,
+    snappy,
+    guava,
     ivy,
     bouncyCastle,
     specs2,
     catsEffectSpecs2,
     catsEffectTestkit,
     slf4j % Test
-  ) ++ commonRuntimeDependencies ++ nettyDependencies
+  ) ++ commonRuntimeDependencies ++ nettyDependencies ++ storageDependencies
 
   val awsDependencies = Seq(
-    kinesis,
-    hadoopAws.exclude("software.amazon.awssdk", "bundle"),
-    awsS3,
-    awsGlue,
-    awsSts,
-    dynamodbSdk1,
-    awsKms          % Runtime,
-    awsApacheClient % Runtime,
-    deltaDynamodb   % Runtime,
-    awsS3Transfer   % Runtime
+    kinesis
   ) ++ commonRuntimeDependencies
 
   val azureDependencies = Seq(
     kafka,
-    azureIdentity,
-    hadoopAzure,
     hadoopClient,
-    kafkaClients % Runtime,
-    reactorCore,
-    reactorNettyHttp,
-    specs2
+    kafkaClients % Runtime
   ) ++ commonRuntimeDependencies
 
   val gcpDependencies = Seq(
-    pubsub,
-    hadoopGcp,
-    googleCloudStorage
+    pubsub
   ) ++ commonRuntimeDependencies
 
   val commonExclusions = Seq(

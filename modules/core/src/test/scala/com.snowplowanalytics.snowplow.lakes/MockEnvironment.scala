@@ -35,7 +35,16 @@ import com.snowplowanalytics.snowplow.streams.{
 import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 
-case class MockEnvironment(state: Ref[IO, Vector[MockEnvironment.Action]], environment: Environment[IO])
+/**
+ * @param supersetEntries
+ *   Every reading of the number of entries in the entity superset, kept apart from `state` because
+ *   it is reported once per batch and would otherwise appear in every expected sequence of actions.
+ */
+case class MockEnvironment(
+  state: Ref[IO, Vector[MockEnvironment.Action]],
+  environment: Environment[IO],
+  supersetEntries: Ref[IO, Vector[Long]]
+)
 
 object MockEnvironment {
 
@@ -61,7 +70,11 @@ object MockEnvironment {
      * otherwise reaches nothing assertable, since a wrong partition assignment is a slow commit
      * rather than a failure.
      */
-    case class PreparedCommit(viewName: String, eventNameCounts: Map[Option[String], Int]) extends Action
+    case class PreparedCommit(
+      viewName: String,
+      eventNameCounts: Map[Option[String], Int],
+      nonAtomicColumnNames: Set[String] = Set.empty
+    ) extends Action
 
     /* Metrics */
     case class AddedReceivedCountMetric(count: Long) extends Action
@@ -100,6 +113,7 @@ object MockEnvironment {
   ): IO[MockEnvironment] =
     for {
       state <- Ref[IO].of(Vector.empty[Action])
+      supersetEntries <- Ref[IO].of(Vector.empty[Long])
       source = testSourceAndAck(windows, state)
     } yield {
       val env = Environment(
@@ -109,7 +123,7 @@ object MockEnvironment {
         resolver                = Resolver[IO](Nil, None),
         httpClient              = testHttpClient,
         lakeWriter              = testLakeWriter(state, diskBytes, storageUsage, sparkUsageReadFails),
-        metrics                 = testMetrics(state),
+        metrics                 = testMetrics(state, supersetEntries),
         appHealth               = testAppHealth(state),
         inMemBatchBytes         = 1000000L,
         cpuParallelism          = 1,
@@ -118,9 +132,10 @@ object MockEnvironment {
         schemasToSkip           = List.empty,
         respectIgluNullability  = true,
         exitOnMissingIgluSchema = false,
+        entitySupersetCapacity  = 500,
         decompression           = DecompressionConfig(maxBytesInBatch = 5242880, maxBytesSinglePayload = 10000000)
       )
-      MockEnvironment(state, env)
+      MockEnvironment(state, env, supersetEntries)
     }
 
   private def testLakeWriter(
@@ -128,7 +143,7 @@ object MockEnvironment {
     diskBytes: Option[Long],
     storageUsage: Option[LakeWriter.BlockManagerUsage],
     sparkUsageReadFails: Boolean
-  ): LakeWriter.WithHandledErrors[IO] = new LakeWriter.WithHandledErrors[IO] {
+  ): LakeWriter[IO] = new LakeWriter[IO] {
     def createTable: IO[Unit] =
       IO.sleep(TimeTakenToCreateTable) *> state.update(_ :+ CreatedTable)
 
@@ -145,8 +160,12 @@ object MockEnvironment {
     def removeDataFrameFromDisk(viewName: String): IO[Unit] =
       state.update(_ :+ RemovedDataFrameFromDisk(viewName))
 
-    def prepareCommit(viewName: String, eventNameCounts: Map[Option[String], Int]): IO[Unit] =
-      state.update(_ :+ PreparedCommit(viewName, eventNameCounts))
+    def prepareCommit(
+      viewName: String,
+      eventNameCounts: Map[Option[String], Int],
+      nonAtomicColumnNames: Set[String]
+    ): IO[Unit] =
+      state.update(_ :+ PreparedCommit(viewName, eventNameCounts, nonAtomicColumnNames))
 
     def commit(viewName: String): IO[Unit] =
       state.update(_ :+ CommittedToTheLake(viewName))
@@ -198,7 +217,7 @@ object MockEnvironment {
     Resource.raiseError[IO, Nothing, Throwable](new RuntimeException("http failure"))
   }
 
-  def testMetrics(ref: Ref[IO, Vector[Action]]): Metrics[IO] = new Metrics[IO] {
+  def testMetrics(ref: Ref[IO, Vector[Action]], supersetEntries: Ref[IO, Vector[Long]]): Metrics[IO] = new Metrics[IO] {
     def addReceived(count: Long): IO[Unit] =
       ref.update(_ :+ AddedReceivedCountMetric(count))
 
@@ -234,6 +253,9 @@ object MockEnvironment {
 
     def setDiskBytes(bytes: Long): IO[Unit] =
       ref.update(_ :+ SetDiskBytes(bytes))
+
+    def setEntitySupersetEntries(count: Long): IO[Unit] =
+      supersetEntries.update(_ :+ count)
 
     def scrape: IO[String] = IO.pure("")
 

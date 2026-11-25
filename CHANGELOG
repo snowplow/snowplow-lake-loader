@@ -1,3 +1,14 @@
+Version 0.15.0 (2026-10-29)
+---------------------------
+Alert "Wrong storage name" again for an ABFS account that does not resolve (#115)
+Harden claude.yml workflow against prompt injection
+Fix a broken scaladoc reference (#111)
+Skip the write on a retried Iceberg commit whose window already landed (#110)
+Triage Databricks REST catalog setup errors missed at startup (#108)
+Pad each batch to a bounded entity superset so Spark reuses its code (#107)
+Support cross-cloud loading: every image writes to S3, GCS and ADLS (#106)
+Add Snowflake key-pair auth for the Iceberg REST catalog (#105)
+
 Version 0.14.1 (2026-10-24)
 ---------------------------
 Trigger build with newest base image

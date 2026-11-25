@@ -15,10 +15,12 @@ import cats.effect.testing.specs2.CatsEffect
 import org.apache.spark.sql.delta.DeltaLog
 import org.specs2.Specification
 
+import java.net.URI
 import java.nio.file.{Files, Paths}
+import java.util.UUID
 import scala.jdk.CollectionConverters._
 
-import com.snowplowanalytics.snowplow.lakes.{Config, TestConfig}
+import com.snowplowanalytics.snowplow.lakes.{Config, DestinationSetupErrorSpec, TestConfig}
 import com.snowplowanalytics.snowplow.lakes.tables.DeltaWriter
 
 import scala.concurrent.duration.DurationInt
@@ -31,6 +33,7 @@ class DeltaWriterSpec extends Specification with CatsEffect {
   def is = sequential ^ s2"""
   DeltaWriter.prepareTable should:
     Open a pre-existing table whose properties lack the current defaults $e1
+    Fail with only "Wrong storage name" for an ABFS location whose host does not resolve $e4
 
   DeltaWriter.describeTable should:
     Report the properties of the existing table, not the ones this loader is configured with $e2
@@ -56,7 +59,7 @@ class DeltaWriterSpec extends Specification with CatsEffect {
     }
     SparkUtils.session[IO](config.spark, new DeltaWriter(delta), delta, cores = 2).use { spark =>
       for {
-        _ <- new DeltaWriter(delta).prepareTable[IO](spark)
+        _ <- new DeltaWriter(delta).prepareTable[IO](spark, UUID.randomUUID)
         // Rewrite commit 0 into the shape an old loader left behind: no deletedFileRetentionDuration.
         // (Delta 4.3 cannot create that state directly: a fresh CREATE with logRetentionDuration=1d
         // and no deletedFileRetentionDuration fails its retention compatibility check.)
@@ -72,7 +75,7 @@ class DeltaWriterSpec extends Specification with CatsEffect {
         // A restarted loader has an empty in-memory session catalog, so createIfNotExists cannot
         // take its ignore-if-exists early exit on the catalog entry; reproduce that state
         _ <- IO.blocking(spark.sql("DROP TABLE IF EXISTS default.events_internal_id"): Unit)
-        result <- new DeltaWriter(delta).prepareTable[IO](spark).attempt
+        result <- new DeltaWriter(delta).prepareTable[IO](spark, UUID.randomUUID).attempt
       } yield result must beRight
     }
   }
@@ -99,9 +102,9 @@ class DeltaWriterSpec extends Specification with CatsEffect {
 
     SparkUtils.session[IO](config.spark, asCreated, delta, cores = 2).use { spark =>
       for {
-        _ <- asCreated.prepareTable[IO](spark)
+        _ <- asCreated.prepareTable[IO](spark, UUID.randomUUID)
         _ <- IO.blocking(spark.sql("DROP TABLE IF EXISTS default.events_internal_id"): Unit)
-        _ <- asRestarted.prepareTable[IO](spark)
+        _ <- asRestarted.prepareTable[IO](spark, UUID.randomUUID)
         described <- asRestarted.describeTable[IO](spark)
         structure  = described(0)
         properties = described(1)
@@ -134,13 +137,33 @@ class DeltaWriterSpec extends Specification with CatsEffect {
 
     SparkUtils.session[IO](config.spark, writer, legacy, cores = 2).use { spark =>
       for {
-        _ <- writer.prepareTable[IO](spark)
+        _ <- writer.prepareTable[IO](spark, UUID.randomUUID)
         described <- writer.describeTable[IO](spark)
         structure = described(0)
       } yield List(
         structure must contain("min writer version = 4"),
         structure must contain("generatedColumns")
       ).reduce(_ and _)
+    }
+  }
+
+  /**
+   * The `.invalid` TLD never resolves, and the host check fails before any credentials or call to
+   * Azure, so this runs offline.
+   */
+  def e4 = fs2.io.file.Files[IO].tempDirectory.use { tmpDir =>
+    val config = TestConfig.defaults(TestConfig.Delta, tmpDir)
+    val delta = config.output.good match {
+      case d: Config.Delta => d
+      case other           => throw new IllegalStateException(s"Expected a Delta target but got $other")
+    }
+    val writer = new DeltaWriter(delta.copy(location = URI.create("abfs://events@nonexistent.invalid/events")))
+
+    SparkUtils.session[IO](config.spark, writer, delta, cores = 2).use { spark =>
+      writer.prepareTable[IO](spark, UUID.randomUUID).attempt.map {
+        case Left(e)  => DestinationSetupErrorSpec.walk(e) must_== List("Wrong storage name")
+        case Right(_) => ko("Expected prepareTable to fail")
+      }
     }
   }
 }

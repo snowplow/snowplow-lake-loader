@@ -13,6 +13,8 @@ package com.snowplowanalytics.snowplow.lakes.tables
 import cats.effect.Sync
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
+import java.util.UUID
+
 /** The methods needed for a writing specific table format (e.g. delta or iceberg) */
 trait Writer {
 
@@ -24,8 +26,11 @@ trait Writer {
    *
    * For some table formats that can mean creating the table, or registering it in an external
    * catalog.
+   *
+   * @param processId
+   *   Identifies this run of the loader.
    */
-  def prepareTable[F[_]: Sync](spark: SparkSession): F[Unit]
+  def prepareTable[F[_]: Sync](spark: SparkSession, processId: UUID): F[Unit]
 
   /**
    * Write Snowplow events into the table.
@@ -52,8 +57,17 @@ trait Writer {
    * throws when a row arrives for a partition whose file it has already closed - so a Spark or
    * Iceberg upgrade that stopped applying the required ordering would fail commits outright.
    * `IcebergWriterSpec` pins that it is still applied.
+   *
+   * @param windowId
+   *   Identifies the window being written; the same on every attempt at it.
+   * @param isRetry
+   *   Whether an earlier attempt at this window failed, and so may have landed all the same.
    */
-  def write[F[_]: Sync](df: DataFrame): F[Unit]
+  def write[F[_]: Sync](
+    df: DataFrame,
+    windowId: Writer.WindowId,
+    isRetry: Boolean
+  ): F[Unit]
 
   /**
    * A summary of the table as it actually exists, one element per line.
@@ -73,6 +87,37 @@ trait Writer {
 }
 
 object Writer {
+
+  /**
+   * Identifies one window's commit, so that a retry can tell whether an earlier attempt landed.
+   *
+   * `processId` is drawn once per process, so the id is stable across a window's attempts and
+   * unique across pods and restarts. It does not survive a restart: a window re-consumed after one
+   * is written again.
+   *
+   * @param window
+   *   The window's view name, or `startupWindow` for the empty commit `prepareTable` makes.
+   */
+  final case class WindowId(processId: UUID, window: String) {
+    def render: String = s"$processId/$window"
+  }
+
+  object WindowId {
+
+    /** Cannot collide with a window's view name, which is `v` followed by digits. */
+    val startupWindow: String = "startup"
+
+    def startup(processId: UUID): WindowId = WindowId(processId, startupWindow)
+
+    /** `None` for anything `render` did not produce, such as a tag written by some other tool. */
+    def parse(rendered: String): Option[WindowId] =
+      rendered.split("/", 2) match {
+        case Array(processId, window) if window.nonEmpty =>
+          scala.util.Try(UUID.fromString(processId)).toOption.map(WindowId(_, window))
+        case _ =>
+          None
+      }
+  }
 
   /**
    * Sorted, so that two deployments' logs can be diffed. Values are quoted because some contain the

@@ -41,6 +41,7 @@ case class Config[+Factory, +Source, +Sink](
   skipSchemas: List[SchemaCriterion],
   respectIgluNullability: Boolean,
   exitOnMissingIgluSchema: Boolean,
+  entitySupersetCapacity: Int,
   retries: Config.Retries,
   http: Config.Http,
   decompression: DecompressionConfig

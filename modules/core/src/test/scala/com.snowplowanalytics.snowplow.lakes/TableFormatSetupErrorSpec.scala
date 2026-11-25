@@ -10,9 +10,12 @@
 
 package com.snowplowanalytics.snowplow.lakes
 
+import org.apache.iceberg.exceptions.NoSuchNamespaceException
 import org.apache.iceberg.rest.ErrorHandlers
 import org.apache.iceberg.rest.responses.ErrorResponse
 import org.specs2.Specification
+
+import com.snowplowanalytics.snowplow.lakes.tables.IcebergWriter
 
 class TableFormatSetupErrorSpec extends Specification {
   def is = s2"""
@@ -23,6 +26,13 @@ class TableFormatSetupErrorSpec extends Specification {
     give a specific message when the catalog rejects a write for metadata size $e4
     classify a BigLake permission denial as a setup error via the shared REST-spec 403 message $e5
     give a specific message for a BigLake project-not-found error $e6
+    classify an unusable Snowflake private key as a setup error $e7
+    not classify a missing Snowflake key-pair auth option as a setup error $e8
+    classify a Databricks table-level permission denial as missing privileges $e9
+    give a specific message when Databricks disables the REST catalog API for the loader's credentials $e10
+    not classify a 403 with an unrecognised message as a setup error $e11
+    give a fixed message, without the namespace or request id, for a missing namespace $e12
+    classify a table loaded without vended credentials as a setup error $e13
   """
 
   def e1 = TableFormatSetupError.IcebergRest.check(restException(429, "")) must beNone
@@ -62,6 +72,52 @@ class TableFormatSetupErrorSpec extends Specification {
     TableFormatSetupError.IcebergRest.check(
       restException(404, "Project p is not found. Make sure it references valid GCP project that hasn't been deleted.")
     ) must beSome("Unable to find the given GCP project for the catalog")
+
+  def e7 =
+    (TableFormatSetupError.IcebergRest.check(new SnowflakeKeyPairAuthManager.UnparseablePrivateKeyError("bad key", null)) must beSome(
+      "Snowflake private key cannot be parsed. Check that it is a PKCS#8 PEM key and that its passphrase is correct"
+    )) and
+      (TableFormatSetupError.IcebergRest.check(new SnowflakeKeyPairAuthManager.NonRsaPrivateKeyError("EC key")) must beSome(
+        "Snowflake private key is not an RSA key"
+      ))
+
+  // Snowplow writes the other options, so a missing one is ours to fix, not the customer's
+  def e8 =
+    TableFormatSetupError.IcebergRest.check(new SnowflakeKeyPairAuthManager.MissingOptionError("missing")) must beNone
+
+  // Unity Catalog's 403 for a missing USE SCHEMA, in Iceberg's error format
+  def e9 =
+    TableFormatSetupError.IcebergRest.check(
+      restException(
+        403,
+        "Permission denied accessing table: pdp_2927.snowplow.events [ErrorCode: 3001] (request_id: 26b80f50-455b-4b34-a275-8149d72bf6fd)"
+      )
+    ) must beSome("Missing privileges on the catalog, schema or table")
+
+  // Databricks' 403 for a service principal without the workspace entitlement the REST catalog API
+  // needs. It is in Databricks' own JSON format, which Iceberg cannot parse, so the message is the
+  // raw body - as the helper builds it here
+  def e10 = {
+    val body =
+      """{"error_code":403,"message":"This API is disabled for users without the databricks-sql-access or workspace-access or workspace-consume entitlements. Contact your administrator for more information. [ReqId: a3aaa2af-8fb1-4f3c-a76e-591240e28f8b]"}"""
+    val e = restException(403, body)
+    (e.getMessage must beEqualTo(s"Forbidden: $body")) and
+      (TableFormatSetupError.IcebergRest.check(e) must beSome(
+        "REST catalog API is disabled for the loader's credentials. Check the entitlements granted to the loader's service principal"
+      ))
+  }
+
+  def e11 = TableFormatSetupError.IcebergRest.check(restException(403, "Something we have never seen")) must beNone
+
+  def e12 =
+    TableFormatSetupError.IcebergRest.check(
+      new NoSuchNamespaceException("Namespace snowplow_missing not found. (request_id: 1d3c0c1e-6b7f-4b0e-9e0b-0c3b4f1f7c2a)")
+    ) must beSome("Unable to find given namespace")
+
+  def e13 =
+    TableFormatSetupError.IcebergRest.check(new IcebergWriter.NoVendedCredentialsError("none vended")) must beSome(
+      "REST catalog did not provide storage credentials for the table. Check that the catalog allows external engines to access the table's storage"
+    )
 
   // Build the exception through Iceberg's own error handler rather than hand-writing the message, so
   // the test pins the real message format and fails if an Iceberg upgrade changes it. Returns the
