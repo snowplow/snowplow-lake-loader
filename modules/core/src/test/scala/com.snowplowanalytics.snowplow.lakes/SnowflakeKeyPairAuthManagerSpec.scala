@@ -48,6 +48,12 @@ class SnowflakeKeyPairAuthManagerSpec extends Specification {
     report a private key that is not RSA $e13
     keep the current token while a renewal fails before it expires $e14
     fail once the current token has expired and renewal still fails $e15
+    derive the account from every form of snowflakecomputing.com catalog uri $e16
+    name the derived account in the JWT's iss and sub $e17
+    keep underscores in the derived account $e18
+    prefer an explicitly configured account to the derived one $e19
+    report an account that cannot be derived from the catalog uri $e20
+    derive the account when the configured account is blank $e21
   """
 
   def e1 = {
@@ -150,6 +156,55 @@ class SnowflakeKeyPairAuthManagerSpec extends Specification {
     (first must_== "Bearer token-1") and
       (session.authenticate(request) must throwA[RuntimeException]("token endpoint unavailable"))
   }
+
+  def e16 = {
+    val hosts = List(
+      "myorg-myacct.snowflakecomputing.com" -> "MYORG-MYACCT",
+      "myorg-myacct.privatelink.snowflakecomputing.com" -> "MYORG-MYACCT",
+      "xy12345.snowflakecomputing.com" -> "XY12345",
+      "xy12345.eu-west-1.snowflakecomputing.com" -> "XY12345",
+      "xy12345.us-east-2.aws.snowflakecomputing.com" -> "XY12345",
+      "xy12345.us-east-1.privatelink.snowflakecomputing.com" -> "XY12345",
+      "MYORG-MYACCT.SNOWFLAKECOMPUTING.COM" -> "MYORG-MYACCT",
+      "myorg-myacct.snowflakecomputing.com." -> "MYORG-MYACCT"
+    )
+    hosts.map { case (host, _) => host -> derivedConfig(s"https://$host/polaris/api/catalog").account } must_== hosts
+  }
+
+  def e17 = {
+    val jwt    = SnowflakeKeyPairAuthManager.mintJwt(derivedConfig("https://myorg-myacct.snowflakecomputing.com/polaris/api/catalog"), now)
+    val cursor = parser.parse(new String(Base64.getUrlDecoder.decode(jwt.split('.')(1)), "UTF-8")).toOption.get.hcursor
+
+    (cursor.get[String]("sub").toOption must beSome("MYORG-MYACCT.LAKE_LOADER_SVC")) and
+      (cursor.get[String]("iss").toOption must beSome(s"MYORG-MYACCT.LAKE_LOADER_SVC.$expectedFingerprint"))
+  }
+
+  def e18 =
+    (derivedConfig("https://myorg-my_acct.snowflakecomputing.com/polaris/api/catalog").account must_== "MYORG-MY_ACCT") and
+      (derivedConfig("https://myorg-my_acct.snowflakecomputing.com:443/polaris/api/catalog").account must_== "MYORG-MY_ACCT")
+
+  def e19 =
+    SnowflakeKeyPairAuthManager.Config
+      .from(
+        properties() + (SnowflakeKeyPairAuthManager.Account -> "otherorg-otheracct") + ("uri" -> "https://myorg-myacct.snowflakecomputing.com/polaris/api/catalog")
+      )
+      .account must_== "OTHERORG-OTHERACCT"
+
+  def e20 =
+    (derivedConfig("https://catalog.example.com/polaris/api/catalog") must throwA[SnowflakeKeyPairAuthManager.UnderivableAccountError]) and
+      (derivedConfig("https://snowflakecomputing.com/polaris/api/catalog") must throwA[
+        SnowflakeKeyPairAuthManager.UnderivableAccountError
+      ]) and
+      (derivedConfig("myorg-myacct.snowflakecomputing.com/polaris/api/catalog") must throwA[
+        SnowflakeKeyPairAuthManager.UnderivableAccountError
+      ])
+
+  def e21 =
+    SnowflakeKeyPairAuthManager.Config
+      .from(
+        properties() + (SnowflakeKeyPairAuthManager.Account -> " ") + ("uri" -> "https://myorg-myacct.snowflakecomputing.com/polaris/api/catalog")
+      )
+      .account must_== "MYORG-MYACCT"
 }
 
 object SnowflakeKeyPairAuthManagerSpec {
@@ -271,6 +326,10 @@ object SnowflakeKeyPairAuthManagerSpec {
       OAuth2Properties.SCOPE -> "session:role:LAKE_LOADER_ROLE",
       OAuth2Properties.OAUTH2_SERVER_URI -> "https://acct.snowflakecomputing.com/polaris/api/catalog/v1/oauth/tokens"
     )
+
+  /** A configuration without `snowflake.auth.account`, so the account comes from `uri` */
+  private def derivedConfig(uri: String) =
+    SnowflakeKeyPairAuthManager.Config.from(properties() - SnowflakeKeyPairAuthManager.Account + ("uri" -> uri))
 
   private def inlineProperties(pem: String): Map[String, String] =
     properties() + (SnowflakeKeyPairAuthManager.PrivateKey -> pem)

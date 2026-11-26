@@ -19,6 +19,7 @@ import fs2.io.file.Files
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SnowplowSparkBlockProbe, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.functions.{col, hash, lit, pmod}
 import org.apache.spark.sql.catalyst.expressions.{CreateArray, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.RepartitionByExpression
 import org.apache.spark.sql.types.{ArrayType, DateType, StringType, StructField, StructType, TimestampType}
@@ -67,6 +68,9 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     Write a slow trickle into a single partition, instead of one file per event $e26
     Balance a window whose events all have a null event_name, with no special case for it $e27
     Fold a split key's partitions into one literal array, rather than build one per row $e28
+    Spread an unpartitioned window by a hash of event_id, ignoring the histogram $e29
+    Spread a small unpartitioned window over only as many partitions as give each minEventsPerSplit events $e30
+    Choose an unpartitioned window's partition count by floor division of numEvents by minEventsPerSplit, between 1 and writerParallelism $e31
   SparkUtils.dropView should:
     Release the window's checkpoint blocks, at either staging level, instead of leaving them to the ContextCleaner $e18
     Release the window's shuffle as well, when prepareCommit left one behind $e19
@@ -889,6 +893,97 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     } yield (onHeap must beEqualTo((3, 3, 0))) and (offHeap must beEqualTo((3, 3, 0)))
   }
 
+  // One event_name below minEventsPerSplit, which packing by event_name would keep whole in a
+  // single partition. Unpartitioned, the histogram is not read at all - it is empty here - and
+  // every row lands in the partition given by the hash of its event_id.
+  def e29 = withSpark.use { spark =>
+    unpartitionedPlacements(spark, "test_unpartitioned_spreads_by_event_id_e29", minEventsPerSplit = 100).map {
+      case (placements, expected) =>
+        (placements must_== expected(4)) and
+          (placements.size must_== 400) and
+          (placements.values.toSet.size must_== 4)
+    }
+  }
+
+  // 400 events with a floor of 150 a partition fill 3 of the 4 writer partitions, hashed over 3.
+  // With the default floor, the same window is a trickle and takes a single partition.
+  def e30 = withSpark.use { spark =>
+    for {
+      // 400 / 130 is 3.08: floor division gives 3 partitions, where a ceiling would give 4
+      three <- unpartitionedPlacements(spark, "test_unpartitioned_small_window_e30_a", minEventsPerSplit = 130)
+      one <- unpartitionedPlacements(spark, "test_unpartitioned_small_window_e30_b", minEventsPerSplit = 5000)
+    } yield {
+      val (threePlacements, threeExpected) = three
+      val (onePlacements, _)               = one
+      (threePlacements must_== threeExpected(3)) and
+        (threePlacements.values.toSet must_== Set(0, 1, 2)) and
+        (onePlacements.size must_== 400) and
+        (onePlacements.values.toSet must_== Set(0))
+    }
+  }
+
+  def e31 = {
+    def numPartitions(
+      numEvents: Int,
+      writerParallelism: Int,
+      minEventsPerSplit: Int
+    ) =
+      SparkUtils.unpartitionedNumPartitions(numEvents, writerParallelism, Config.WriterPartitioning(4, minEventsPerSplit))
+    List(
+      numPartitions(0, 4, 100) must_== 1,
+      numPartitions(1, 4, 100) must_== 1,
+      numPartitions(99, 4, 100) must_== 1,
+      numPartitions(100, 4, 100) must_== 1,
+      numPartitions(199, 4, 100) must_== 1,
+      numPartitions(200, 4, 100) must_== 2,
+      numPartitions(399, 4, 100) must_== 3,
+      numPartitions(5001, 4, 5000) must_== 1,
+      numPartitions(1000000, 4, 100) must_== 4,
+      numPartitions(Int.MaxValue, 4, 5000) must_== 4,
+      numPartitions(10, 4, 1) must_== 4
+    ).reduce(_ and _)
+  }
+
+  /**
+   * Prepares a 400-event window of one event_name for an unpartitioned table with
+   * `writerParallelism` 4, and returns each event_id's partition, alongside a function giving the
+   * partition `pmod(hash(event_id), n)` would put it in.
+   */
+  private def unpartitionedPlacements(
+    spark: SparkSession,
+    viewName: String,
+    minEventsPerSplit: Int
+  ): IO[(Map[String, Int], Int => Map[String, Int])] = {
+    val window = windowOf(spark, Map(Option("only") -> 400))
+    for {
+      _ <- IO.blocking(window.createOrReplaceTempView(viewName))
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 4,
+              Config.WriterPartitioning(splitsPerFairShare = 4, minEventsPerSplit = minEventsPerSplit),
+              None,
+              400,
+              Map.empty
+            )
+      placements <- IO.blocking {
+                      df.rdd
+                        .mapPartitionsWithIndex { case (partition, rows) => rows.map(row => (row.getAs[String]("event_id"), partition)) }
+                        .collect()
+                        .toMap
+                    }
+    } yield {
+      def expected(n: Int): Map[String, Int] =
+        window
+          .select(col("event_id"), pmod(hash(col("event_id")), lit(n)))
+          .collect()
+          .map(row => (row.getString(0), row.getInt(1)))
+          .toMap
+      (placements, expected)
+    }
+  }
+
   // dropView is the guaranteed finalizer, so it has to finish whatever prepareCommit started -
   // including the shuffle, which by then is the only copy of the window's data.
   def e19 = withSpark.use { spark =>
@@ -897,7 +992,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     for {
       _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
       rdd <- localAppendRows(spark, viewName, eventRows("e1", "e2"), eventSchema, shouldRestoreNullability = true)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 2,
+              defaultPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              pageViewCounts(2).values.sum,
+              pageViewCounts(2)
+            )
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       shuffleId = shuffled.shuffle.map(_.id).getOrElse(throw new IllegalStateException("Expected a shuffle id"))
       registeredBefore <- IO.blocking(SnowplowSparkBlockProbe.shuffleRegistered(shuffleId))
@@ -915,7 +1019,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     for {
       _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
       rdd <- localAppendRows(spark, viewName, eventRows("e1", "e2", "e3"), eventSchema, shouldRestoreNullability = true)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 2, defaultPartitioning, pageViewCounts(3))
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 2,
+              defaultPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              pageViewCounts(3).values.sum,
+              pageViewCounts(3)
+            )
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
       _ <- SparkUtils.releaseStagedBatches[IO](List(rdd))
@@ -939,7 +1052,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
                 localAppendRows(spark, viewName, _, eventSchema, shouldRestoreNullability = true)
               )
       partitionsBefore <- IO.blocking(spark.table(viewName).queryExecution.toRdd.getNumPartitions)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 1, defaultPartitioning, pageViewCounts(2))
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 1,
+              defaultPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              pageViewCounts(2).values.sum,
+              pageViewCounts(2)
+            )
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
       persisted <- IO.blocking(rdds.forall(rdd => spark.sparkContext.getPersistentRDDs.contains(rdd.id)))
@@ -967,7 +1089,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     for {
       _ <- SparkUtils.initializeLocalDataFrame[IO](spark, viewName)
       _ <- localAppendRows(spark, viewName, eventRows("e1", "e2"), eventSchema, shouldRestoreNullability = true)
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 2, defaultPartitioning, pageViewCounts(2))
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 2,
+              defaultPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              pageViewCounts(2).values.sum,
+              pageViewCounts(2)
+            )
       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
       _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
       first <- stampsFromOneAttempt
@@ -1009,7 +1140,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val viewName = "test_split_partitioning_e24"
     for {
       _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, skewedCounts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 6,
+              skewPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              skewedCounts.values.sum,
+              skewedCounts
+            )
       numPartitions <- IO.blocking(df.rdd.getNumPartitions)
       placements <- IO.blocking(collectPlacements(df))
       partitionSizes = placements.groupBy(_._2).view.mapValues(_.size).values.toList
@@ -1032,7 +1172,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val viewName = "test_small_name_kept_whole_e25"
     for {
       _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, skewedCounts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 6,
+              skewPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              skewedCounts.values.sum,
+              skewedCounts
+            )
       placements <- IO.blocking(collectPlacements(df))
       spreadOfColdNames = placements.collect { case (name, partition) if name.startsWith("cold_") => (name, partition) }.distinct
     } yield spreadOfColdNames.groupBy(_._1).values.map(_.size).toList.distinct must_== List(1)
@@ -1046,7 +1195,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val counts   = Map(Option("hot") -> 2)
     for {
       _ <- IO.blocking(windowOf(spark, counts).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 31, tricklePartitioning, counts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 31,
+              tricklePartitioning,
+              Some(Config.PartitionColumn.EventName),
+              counts.values.sum,
+              counts
+            )
       placements <- IO.blocking(collectPlacements(df))
     } yield (placements.size must_== 2) and (placements.map(_._2).distinct.size must_== 1)
   }
@@ -1059,7 +1217,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val counts   = Map(Option.empty[String] -> 600)
     for {
       _ <- IO.blocking(windowOf(spark, counts).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, counts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 6,
+              skewPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              counts.values.sum,
+              counts
+            )
       numPartitions <- IO.blocking(df.rdd.getNumPartitions)
       perPartition <- IO.blocking(df.rdd.mapPartitions(rows => Iterator(rows.size)).collect().toList)
     } yield (numPartitions must_== 6) and
@@ -1077,7 +1244,16 @@ class SparkUtilsSpec extends Specification with CatsEffect {
     val viewName = "test_partition_array_folded_e28"
     for {
       _ <- IO.blocking(skewedWindow(spark).createOrReplaceTempView(viewName))
-      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, Set.empty, writerParallelism = 6, skewPartitioning, skewedCounts)
+      df <- SparkUtils.prepareFinalDataFrame[IO](
+              spark,
+              viewName,
+              Set.empty,
+              writerParallelism = 6,
+              skewPartitioning,
+              Some(Config.PartitionColumn.EventName),
+              skewedCounts.values.sum,
+              skewedCounts
+            )
       // The repartition's own expression, not whatever else the plan holds, so this cannot pass on
       // a folded array that came from somewhere else - and fails loudly if the plan shape moves.
       expressions <- IO.blocking {

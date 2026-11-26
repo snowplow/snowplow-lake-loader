@@ -23,15 +23,7 @@ import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 import com.snowplowanalytics.iglu.client.Resolver
 import com.snowplowanalytics.snowplow.runtime.AppHealth
-import com.snowplowanalytics.snowplow.streams.{
-  EventProcessingConfig,
-  EventProcessor,
-  ListOfList,
-  Sink,
-  Sinkable,
-  SourceAndAck,
-  TokenedEvents
-}
+import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, EventProcessor, Sink, Sinkable, SourceAndAck, TokenedEvents}
 import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 
@@ -66,13 +58,13 @@ object MockEnvironment {
     case class CommittedToTheLake(viewName: String) extends Action
 
     /**
-     * The histogram is on the action because it is the only thing that pins `countEventNames`: it
-     * otherwise reaches nothing assertable, since a wrong partition assignment is a slow commit
+     * The histogram is on the action because it is the only thing that pins `countPartitionValues`:
+     * it otherwise reaches nothing assertable, since a wrong partition assignment is a slow commit
      * rather than a failure.
      */
     case class PreparedCommit(
       viewName: String,
-      eventNameCounts: Map[Option[String], Int],
+      partitionCounts: Map[Option[String], Int],
       nonAtomicColumnNames: Set[String] = Set.empty
     ) extends Action
 
@@ -102,6 +94,8 @@ object MockEnvironment {
    * @param windows
    *   Input events to send into the environment. The outer List represents a timed window of
    *   events; the inner list represents batches of events within the window
+   * @param mocks
+   *   Responses we want the mocked services to return when someone calls them
    * @return
    *   An environment and a Ref that records the actions make by the environment
    */
@@ -109,7 +103,9 @@ object MockEnvironment {
     windows: List[List[TokenedEvents]],
     diskBytes: Option[Long]                            = Some(1415L),
     storageUsage: Option[LakeWriter.BlockManagerUsage] = Some(LakeWriter.BlockManagerUsage(1011L, 1213L)),
-    sparkUsageReadFails: Boolean                       = false
+    sparkUsageReadFails: Boolean                       = false,
+    mocks: Mocks                                       = Mocks.default,
+    partitionColumn: Option[Config.PartitionColumn]    = Some(Config.PartitionColumn.EventName)
   ): IO[MockEnvironment] =
     for {
       state <- Ref[IO].of(Vector.empty[Action])
@@ -119,10 +115,10 @@ object MockEnvironment {
       val env = Environment(
         appInfo                 = TestSparkEnvironment.appInfo,
         source                  = source,
-        badSink                 = testSink(state),
+        badSink                 = testSink(mocks.badSinkResponse, state),
         resolver                = Resolver[IO](Nil, None),
         httpClient              = testHttpClient,
-        lakeWriter              = testLakeWriter(state, diskBytes, storageUsage, sparkUsageReadFails),
+        lakeWriter              = testLakeWriter(state, diskBytes, storageUsage, sparkUsageReadFails, partitionColumn),
         metrics                 = testMetrics(state, supersetEntries),
         appHealth               = testAppHealth(state),
         inMemBatchBytes         = 1000000L,
@@ -138,12 +134,31 @@ object MockEnvironment {
       MockEnvironment(state, env, supersetEntries)
     }
 
+  final case class Mocks(
+    badSinkResponse: Response[Unit]
+  )
+
+  object Mocks {
+    val default: Mocks = Mocks(
+      badSinkResponse = Response.Success(())
+    )
+  }
+
+  sealed trait Response[+A]
+  object Response {
+    final case class Success[A](value: A) extends Response[A]
+    final case class ExceptionThrown(value: Throwable) extends Response[Nothing]
+  }
+
   private def testLakeWriter(
     state: Ref[IO, Vector[Action]],
     diskBytes: Option[Long],
     storageUsage: Option[LakeWriter.BlockManagerUsage],
-    sparkUsageReadFails: Boolean
+    sparkUsageReadFails: Boolean,
+    column: Option[Config.PartitionColumn]
   ): LakeWriter[IO] = new LakeWriter[IO] {
+    val partitionColumn: Option[Config.PartitionColumn] = column
+
     def createTable: IO[Unit] =
       IO.sleep(TimeTakenToCreateTable) *> state.update(_ :+ CreatedTable)
 
@@ -162,10 +177,11 @@ object MockEnvironment {
 
     def prepareCommit(
       viewName: String,
-      eventNameCounts: Map[Option[String], Int],
+      numEvents: Int,
+      partitionCounts: Map[Option[String], Int],
       nonAtomicColumnNames: Set[String]
     ): IO[Unit] =
-      state.update(_ :+ PreparedCommit(viewName, eventNameCounts, nonAtomicColumnNames))
+      state.update(_ :+ PreparedCommit(viewName, partitionCounts, nonAtomicColumnNames))
 
     def commit(viewName: String): IO[Unit] =
       state.update(_ :+ CommittedToTheLake(viewName))
@@ -207,10 +223,15 @@ object MockEnvironment {
         IO.pure(None)
     }
 
-  private def testSink(ref: Ref[IO, Vector[Action]]): Sink[IO] = new Sink[IO] {
+  private def testSink(mockedResponse: Response[Unit], ref: Ref[IO, Vector[Action]]): Sink[IO] = new Sink[IO] {
     def isHealthy: IO[Boolean] = IO.pure(true)
-    def sink(batch: ListOfList[Sinkable]): IO[Unit] =
-      ref.update(_ :+ SentToBad(batch.asIterable.size))
+    def sink(batch: Iterable[Sinkable]): IO[Unit] =
+      mockedResponse match {
+        case Response.Success(_) =>
+          ref.update(_ :+ SentToBad(batch.size))
+        case Response.ExceptionThrown(value) =>
+          IO.raiseError(value)
+      }
   }
 
   private def testHttpClient: Client[IO] = Client[IO] { _ =>

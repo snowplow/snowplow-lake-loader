@@ -66,7 +66,7 @@ class LakeWriterSpec extends Specification with CatsEffect {
         before <- IO.blocking(SnowplowSparkBlockProbe.registeredShuffleIds)
         _ <- lakeWriter.initializeLocalDataFrame(viewName)
         _ <- lakeWriter.localAppendRows(viewName, rows, schema)
-        _ <- lakeWriter.prepareCommit(viewName, eventNameCounts, Set.empty)
+        _ <- lakeWriter.prepareCommit(viewName, eventNameCounts.values.sum, eventNameCounts, Set.empty)
         created <- IO.blocking(SnowplowSparkBlockProbe.registeredShuffleIds -- before)
         _ <- lakeWriter.removeDataFrameFromDisk(viewName)
         leaked <- IO.blocking(created.filter(SnowplowSparkBlockProbe.shuffleRegistered))
@@ -91,7 +91,7 @@ class LakeWriterSpec extends Specification with CatsEffect {
         _ <- lakeWriter.localAppendRows(viewName, rows, schema)
         shuffleBytesBefore <- lakeWriter.getShuffleDiskBytes
         peakBefore <- lakeWriter.getStorageUsage(viewName)
-        _ <- lakeWriter.prepareCommit(viewName, eventNameCounts, Set.empty)
+        _ <- lakeWriter.prepareCommit(viewName, eventNameCounts.values.sum, eventNameCounts, Set.empty)
         shuffleBytesDuring <- lakeWriter.getShuffleDiskBytes
         // Recorded by prepareCommit only where it released the batches, so only where it shuffled.
         peakAfterPrepare <- lakeWriter.getStorageUsage(viewName)
@@ -127,7 +127,7 @@ class LakeWriterSpec extends Specification with CatsEffect {
       for {
         _ <- lakeWriter.initializeLocalDataFrame(busyView)
         _ <- lakeWriter.localAppendRows(busyView, rows, schema)
-        _ <- lakeWriter.prepareCommit(busyView, eventNameCounts, Set.empty)
+        _ <- lakeWriter.prepareCommit(busyView, eventNameCounts.values.sum, eventNameCounts, Set.empty)
         _ <- lakeWriter.recordBlockManagerPeak(busyView)
         busyPeak <- lakeWriter.getStorageUsage(busyView)
         // A window that never staged anything, so it has no peak of its own to report.
@@ -155,7 +155,7 @@ class LakeWriterSpec extends Specification with CatsEffect {
       for {
         _ <- lakeWriter.initializeLocalDataFrame(viewName)
         _ <- lakeWriter.localAppendRows(viewName, rows, schema)
-        _ <- lakeWriter.prepareCommit(viewName, eventNameCounts, Set.empty)
+        _ <- lakeWriter.prepareCommit(viewName, eventNameCounts.values.sum, eventNameCounts, Set.empty)
         shuffleBytes <- lakeWriter.getShuffleDiskBytes
         peakAfterPrepare <- lakeWriter.getStorageUsage(viewName)
         _ <- lakeWriter.recordBlockManagerPeak(viewName)
@@ -180,13 +180,13 @@ class LakeWriterSpec extends Specification with CatsEffect {
       for {
         _ <- lakeWriter.initializeLocalDataFrame(firstView)
         _ <- lakeWriter.localAppendRows(firstView, rows, schema)
-        _ <- lakeWriter.prepareCommit(firstView, eventNameCounts, Set.empty)
+        _ <- lakeWriter.prepareCommit(firstView, eventNameCounts.values.sum, eventNameCounts, Set.empty)
         oneWindow <- lakeWriter.getShuffleDiskBytes
         // A second window reaching prepareCommit before the first is dropped, which is what an
         // overrunning commit produces.
         _ <- lakeWriter.initializeLocalDataFrame(secondView)
         _ <- lakeWriter.localAppendRows(secondView, rows, schema)
-        _ <- lakeWriter.prepareCommit(secondView, eventNameCounts, Set.empty)
+        _ <- lakeWriter.prepareCommit(secondView, eventNameCounts.values.sum, eventNameCounts, Set.empty)
         twoWindows <- lakeWriter.getShuffleDiskBytes
         _ <- lakeWriter.removeDataFrameFromDisk(firstView)
         afterFirstDropped <- lakeWriter.getShuffleDiskBytes

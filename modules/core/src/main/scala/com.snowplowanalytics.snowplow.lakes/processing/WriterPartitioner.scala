@@ -26,9 +26,11 @@ import com.snowplowanalytics.snowplow.lakes.Config
  * commit that outlasts its window makes the loader fall progressively behind.
  *
  * And it must keep each `event_name` in as few partitions as possible, because the lake is
- * partitioned by `event_name`, so every extra partition holding a name is an extra, smaller file.
+ * partitioned by `event_name`, so every extra partition holding one is an extra, smaller file. The
+ * same holds for `app_id` when that is the partition column. Either way the histogram's keys are
+ * opaque values of the column, and below they are called keys.
  *
- * `WindowState.eventNameCounts` gives every key's size on the driver before the shuffle runs, which
+ * `WindowState.partitionCounts` gives every key's size on the driver before the shuffle runs, which
  * is what allows the assignment to be chosen outright rather than left to a hash:
  *
  *   - Keys are bin-packed into exactly `writerParallelism` bins, largest first, which is within 4/3
@@ -36,7 +38,8 @@ import com.snowplowanalytics.snowplow.lakes.Config
  *     scattering keys over so few bins is lumpy, and hashing's only remedy is more partitions,
  *     which the reserved slot forbids.
  *   - `None` is a key like any other, because the lake has an `event_name=null` partition just as
- *     it has one per name. A window of entirely nameless events balances like one sharing a name.
+ *     it has one per `event_name`. A window of entirely nameless events balances like one sharing a
+ *     single key.
  *   - A key bigger than a fair share fits in no bin, so it is cut into pieces first, and which
  *     piece a row belongs to is decided by hashing `event_id` - a UUID, so it splits evenly. This
  *     is the one place a hash is right, because here an even split is all that is wanted.
@@ -71,14 +74,14 @@ private[processing] object WriterPartitioner {
    * @param numPartitions
    *   How many partitions to shuffle into. Always `writerParallelism`.
    * @param assignments
-   *   For each `event_name` - `None` being the events that have none - the partitions its rows go
-   *   to. A key that was not split has one entry; a key split into k pieces has k, and which one a
-   *   row uses is decided by hashing its `event_id`. The same partition may appear twice, meaning
-   *   two pieces of that key share a partition and merge back into one output file.
+   *   For each key - `None` being the events with no `event_name` - the partitions its rows go to.
+   *   A key that was not split has one entry; a key split into k pieces has k, and which one a row
+   *   uses is decided by hashing its `event_id`. The same partition may appear twice, meaning two
+   *   pieces of that key share a partition and merge back into one output file.
    *
    * Ordered by descending event count, which callers depend on: `SparkUtils.partitionIdColumn`
    * turns this into a CASE, and Spark evaluates a CASE as a short-circuiting chain in branch order,
-   * so the keys that most rows have must come first. Ties break on name, so the same histogram
+   * so the keys that most rows have must come first. Ties break on key, so the same histogram
    * always yields the same plan.
    * @param fallbackPartition
    *   Where rows go when `event_name` matches no key. Unreachable, because the histogram is built
@@ -96,12 +99,12 @@ private[processing] object WriterPartitioner {
   )
 
   def plan(
-    eventNameCounts: Map[Option[String], Int],
+    partitionCounts: Map[Option[String], Int],
     writerParallelism: Int,
     config: Config.WriterPartitioning
   ): Plan = {
     val numPartitions = writerParallelism.max(1)
-    val totalEvents   = eventNameCounts.values.map(_.toLong).sum
+    val totalEvents   = partitionCounts.values.map(_.toLong).sum
     val fairShare     = totalEvents.toDouble / numPartitions
 
     // Two candidate plans. The first cuts the fewest keys that could balance anything - only those
@@ -117,8 +120,8 @@ private[processing] object WriterPartitioner {
     // loose enough to leave an even window alone also declines the cases the second plan exists
     // for. Both plans are arithmetic over at most `numPartitions * splitsPerFairShare` items, so
     // computing the one we discard is far cheaper than choosing between them badly.
-    val whole = pack(eventNameCounts, numPartitions, choosePieceCounts(eventNameCounts, fairShare, totalEvents, numPartitions, config))
-    val cut   = pack(eventNameCounts, numPartitions, choosePieceCounts(eventNameCounts, 0d, totalEvents, numPartitions, config))
+    val whole = pack(partitionCounts, numPartitions, choosePieceCounts(partitionCounts, fairShare, totalEvents, numPartitions, config))
+    val cut   = pack(partitionCounts, numPartitions, choosePieceCounts(partitionCounts, 0d, totalEvents, numPartitions, config))
 
     // By a margin, not by any improvement at all: the second plan pays an output file per extra
     // piece, and a hair's-breadth gain in the heaviest partition does not earn that. Relative
@@ -127,7 +130,7 @@ private[processing] object WriterPartitioner {
 
     // Hottest first, for the reason given on Plan.assignments. Ordering[Option[String]] is a total
     // order, so a window holding both a null event_name and one named "" still sorts predictably.
-    val ordered = chosen.assignments.toVector.sortBy { case (name, _) => (-eventNameCounts.getOrElse(name, 0), name) }
+    val ordered = chosen.assignments.toVector.sortBy { case (key, _) => (-partitionCounts.getOrElse(key, 0), key) }
 
     Plan(numPartitions, ordered, lightest(chosen.loads), chosen.loads)
   }
@@ -141,25 +144,25 @@ private[processing] object WriterPartitioner {
 
   /** Greedy largest-first bin packing of the pieces into `numPartitions` bins. */
   private def pack(
-    eventNameCounts: Map[Option[String], Int],
+    partitionCounts: Map[Option[String], Int],
     numPartitions: Int,
     pieceCounts: Map[Option[String], Int]
   ): Packing = {
-    // One item per piece, weighted by the events it will carry. Sorted largest first, with name and
+    // One item per piece, weighted by the events it will carry. Sorted largest first, with key and
     // piece index breaking ties so that the same histogram always produces the same plan.
-    val items = eventNameCounts.toList
-      .flatMap { case (name, count) =>
-        val pieces    = pieceCounts.getOrElse(name, 1)
+    val items = partitionCounts.toList
+      .flatMap { case (key, count) =>
+        val pieces    = pieceCounts.getOrElse(key, 1)
         val perPiece  = count / pieces
         val remainder = count % pieces
-        (0 until pieces).map(i => (name, i, (perPiece + (if (i < remainder) 1 else 0)).toLong))
+        (0 until pieces).map(i => (key, i, (perPiece + (if (i < remainder) 1 else 0)).toLong))
       }
-      .sortBy { case (name, piece, weight) => (-weight, name, piece) }
+      .sortBy { case (key, piece, weight) => (-weight, key, piece) }
 
     val empty = Packing(Vector.fill(numPartitions)(0L), Map.empty)
-    items.foldLeft(empty) { case (Packing(loads, assignments), (name, _, weight)) =>
+    items.foldLeft(empty) { case (Packing(loads, assignments), (key, _, weight)) =>
       val bin = lightest(loads)
-      Packing(loads.updated(bin, loads(bin) + weight), assignments.updated(name, assignments.getOrElse(name, Vector.empty) :+ bin))
+      Packing(loads.updated(bin, loads(bin) + weight), assignments.updated(key, assignments.getOrElse(key, Vector.empty) :+ bin))
     }
   }
 
@@ -167,24 +170,24 @@ private[processing] object WriterPartitioner {
     loads.indices.minBy(i => (loads(i), i))
 
   /**
-   * Event names bigger than `threshold`, mapped to the number of pieces to cut them into.
+   * Keys bigger than `threshold`, mapped to the number of pieces to cut them into.
    *
-   * The first plan passes a fair share, so it considers only a name that cannot fit in one
+   * The first plan passes a fair share, so it considers only a key that cannot fit in one
    * partition. The second passes zero and lets the arithmetic decide, which needs no threshold of
-   * its own: `wanted` is one for any name holding at most `totalEvents / slices` events, and
-   * `permitted` is one for any name below twice `minEventsPerSplit`, so either way the filter below
+   * its own: `wanted` is one for any key holding at most `totalEvents / slices` events, and
+   * `permitted` is one for any key below twice `minEventsPerSplit`, so either way the filter below
    * drops it.
    *
    * Every degenerate window falls out of the three caps rather than needing a guard. An empty
-   * histogram never reaches the division, there being no names to iterate. A window holding fewer
-   * events than `slices` gives `wanted` more pieces than the name has events, which `.min(count)`
+   * histogram never reaches the division, there being no keys to iterate. A window holding fewer
+   * events than `slices` gives `wanted` more pieces than the key has events, which `.min(count)`
    * takes back - that cap, not `permitted`, is what holds when `minEventsPerSplit` is 1.
    *
    * `wanted` cannot overflow: `count` is at most `totalEvents`, so the quotient is bounded by
    * `slices`, and the numerator by `totalEvents * slices`.
    */
   private def choosePieceCounts(
-    eventNameCounts: Map[Option[String], Int],
+    partitionCounts: Map[Option[String], Int],
     threshold: Double,
     totalEvents: Long,
     numPartitions: Int,
@@ -192,20 +195,20 @@ private[processing] object WriterPartitioner {
   ): Map[Option[String], Int] = {
     // Pieces of `totalEvents / slices` events, which is a fair share divided by `splitsPerFairShare`.
     val slices = numPartitions.toLong * config.splitsPerFairShare.max(1)
-    eventNameCounts
+    partitionCounts
       .collect {
         // How finely we would like to cut, against how finely the floor permits. The floor is
         // integer division, so every piece holds at least `minEventsPerSplit` events - which is the
         // point of applying it here rather than to the size aimed for, where rounding the piece
         // count up would round the piece size back down through it. There is no point having more
         // pieces than events, hence the last cap.
-        case (name, count) if count > threshold =>
+        case (key, count) if count > threshold =>
           val wanted    = ceilDiv(count.toLong * slices, totalEvents.max(1))
           val permitted = (count / config.minEventsPerSplit.max(1)).max(1).toLong
-          name -> wanted.min(permitted).min(count.toLong).toInt
+          key -> wanted.min(permitted).min(count.toLong).toInt
       }
       .filter { case (_, pieces) =>
-        // A name the floor has kept whole comes out of the arithmetic above as a single piece.
+        // A key the floor has kept whole comes out of the arithmetic above as a single piece.
         pieces > 1
       }
   }

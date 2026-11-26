@@ -25,7 +25,7 @@ import org.apache.iceberg.rest.auth.OAuth2Properties
 
 import org.apache.spark.sql.delta.DeltaAnalysisException
 
-import com.snowplowanalytics.snowplow.lakes.tables.IcebergWriter
+import com.snowplowanalytics.snowplow.lakes.tables.{IcebergWriter, Writer}
 
 import java.net.UnknownHostException
 
@@ -33,16 +33,31 @@ object TableFormatSetupError {
 
   // Check if given exception is specific to iceberg format
   def check(target: Config.Target): PartialFunction[Throwable, String] =
-    target match {
-      case _: Config.Delta => Delta.check.unlift
-      case c: Config.Iceberg =>
-        c.catalog match {
-          case _: Config.IcebergCatalog.Glue   => IcebergGlue.check.unlift
-          case _: Config.IcebergCatalog.Rest   => IcebergRest.check.unlift
-          case _: Config.IcebergCatalog.Hadoop => PartialFunction.empty
-        }
-      case _ => PartialFunction.empty
+    Table.check.unlift.orElse {
+      target match {
+        case _: Config.Delta => Delta.check.unlift
+        case c: Config.Iceberg =>
+          c.catalog match {
+            case _: Config.IcebergCatalog.Glue   => IcebergGlue.check.unlift
+            case _: Config.IcebergCatalog.Rest   => IcebergRest.check.unlift
+            case _: Config.IcebergCatalog.Hadoop => PartialFunction.empty
+          }
+        case _ => PartialFunction.empty
+      }
     }
+
+  /** Problems with the table that apply whatever its format and catalog */
+  object Table {
+    def check: Throwable => Option[String] = {
+      case e: Writer.PartitioningMismatchException =>
+        val configured = e.column match {
+          case Some(column) => s"a table partitioned by the date of load_tstamp and ${column.name}"
+          case None         => "a table that is not partitioned"
+        }
+        Some(s"The table's partitioning does not match the loader's configuration. The loader is configured to load into $configured")
+      case _ => None
+    }
+  }
 
   object Delta {
     def check: Throwable => Option[String] = {
@@ -81,7 +96,10 @@ object TableFormatSetupError {
             "REST catalog API is disabled for the loader's credentials. Check the entitlements granted to the loader's service principal"
           )
         else
-          None
+          // Any other 403 is treated as the customer's to fix, in the catalog or the storage behind it. This
+          // trusts a catalog to answer 403 only for a refusal: one that answered 403 for a transient
+          // condition, such as a proxy's rate limiting, would raise a setup alert instead of being retried
+          Some(forbiddenMessage)
       case _: NoSuchNamespaceException =>
         Some("Unable to find given namespace")
       case e: BadRequestException if messageContains(e, "CATALOG_DOES_NOT_EXIST") =>
@@ -107,6 +125,9 @@ object TableFormatSetupError {
       case _: SnowflakeKeyPairAuthManager.NonRsaPrivateKeyError =>
         // The customer's key parses, but Snowflake key-pair auth needs an RSA key
         Some("Snowflake private key is not an RSA key")
+      case _: SnowflakeKeyPairAuthManager.UnderivableAccountError =>
+        // The customer's catalog URL is not a Snowflake account URL, and no account is configured instead
+        Some("Snowflake account cannot be derived from the catalog URL. Check it is your account's snowflakecomputing.com URL")
       case e: RESTException if isTransientHttpStatus(e) =>
         // Transient status (timeout / rate limiting / gateway error); must be retried, not classified as a setup error
         None
@@ -211,7 +232,10 @@ object TableFormatSetupError {
       errorType.filter(errorTypes.contains(_))
     }
 
+    private val forbiddenMessage =
+      "REST catalog denied the loader access. Check the catalog's setup and the permissions granted to the loader"
+
     private def oauthErrorMessage(errorType: String): String =
-      s"OAuth error from REST Iceberg catalog: $errorType"
+      s"REST catalog rejected the loader's credentials (OAuth error: $errorType). Check the credentials configured for the catalog, and the role or scope they request"
   }
 }

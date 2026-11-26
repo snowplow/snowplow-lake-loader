@@ -19,15 +19,7 @@ import fs2.io.file.Path
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 
 import com.snowplowanalytics.iglu.client.Resolver
-import com.snowplowanalytics.snowplow.streams.{
-  EventProcessingConfig,
-  EventProcessor,
-  ListOfList,
-  Sink,
-  Sinkable,
-  SourceAndAck,
-  TokenedEvents
-}
+import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, EventProcessor, Sink, Sinkable, SourceAndAck, TokenedEvents}
 import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
 import com.snowplowanalytics.snowplow.lakes.processing.LakeWriter
 import com.snowplowanalytics.snowplow.runtime.{AppHealth, AppInfo, Retrying}
@@ -60,8 +52,8 @@ object TestSparkEnvironment {
     appInfo = appInfo,
     source  = source,
     badSink = new Sink[IO] {
-      def isHealthy: IO[Boolean]                      = IO.pure(true)
-      def sink(batch: ListOfList[Sinkable]): IO[Unit] = IO.unit
+      def isHealthy: IO[Boolean]                    = IO.pure(true)
+      def sink(batch: Iterable[Sinkable]): IO[Unit] = IO.unit
     },
     resolver                = Resolver[IO](Nil, None),
     httpClient              = testHttpClient,

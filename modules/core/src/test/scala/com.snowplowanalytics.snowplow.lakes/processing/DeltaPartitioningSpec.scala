@@ -85,7 +85,9 @@ class DeltaPartitioningSpec extends Specification with CatsEffect {
                       nonAtomicColumnNames = Set.empty,
                       writerParallelism    = 3,
                       writerPartitioning   = partitioning,
-                      eventNameCounts      = counts
+                      partitionColumn      = Some(Config.PartitionColumn.EventName),
+                      numEvents            = counts.values.sum,
+                      partitionCounts      = counts
                     )
         shuffled <- SparkUtils.materializeShuffle[IO](spark, prepared)
         _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)

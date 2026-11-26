@@ -44,8 +44,11 @@ class RemoteTableSpec extends Specification with CatsEffect {
     become healthy after committing to the lake $e6
     become unhealthy after failure to commit to the lake $e7
     tell the first attempt at a commit that it is not a retry, and every later attempt that it is $e8
-    not start a second window's commit while the first window's commit is retrying $e9
+    not start a second window's commit, or its partitioning check, while the first window's commit is retrying $e9
     report a table metric that fails to read as absent rather than failing $e10
+    fail a commit on a partitioning mismatch before attempting it, with no retry, alert or change of health $e11
+    let a failure to read the partitioning pass, so the window is committed $e12
+    fail a commit the same way when the config is for no partitioning and the table is partitioned $e13
   """
 
   def e1 =
@@ -162,6 +165,7 @@ class RemoteTableSpec extends Specification with CatsEffect {
   def e6 =
     control().flatMap { c =>
       val expected = Vector(
+        Action.PartitioningChecked,
         Action.CommitAttempted("testview", isRetry = false),
         Action.BecameHealthy(RuntimeService.SparkWriter),
         Action.BecameHealthyForSetup
@@ -191,9 +195,11 @@ class RemoteTableSpec extends Specification with CatsEffect {
       }
 
       val expected = Vector(
+        Action.PartitioningChecked,
         Action.CommitAttempted("testview1", isRetry = false),
         Action.BecameHealthy(RuntimeService.SparkWriter),
-        Action.BecameHealthyForSetup
+        Action.BecameHealthyForSetup,
+        Action.PartitioningChecked
       ) ++ commitAttempts
 
       val test = for {
@@ -249,10 +255,12 @@ class RemoteTableSpec extends Specification with CatsEffect {
         _ <- first.joinWithNever
         _ <- second.joinWithNever
         state <- c.state.get
-      } yield commitAttempts(state) must beEqualTo(
+      } yield checksAndCommitAttempts(state) must beEqualTo(
         Vector(
+          Action.PartitioningChecked,
           Action.CommitAttempted("window1", isRetry = false),
           Action.CommitAttempted("window1", isRetry = true),
+          Action.PartitioningChecked,
           Action.CommitAttempted("window2", isRetry = false)
         )
       )
@@ -271,6 +279,40 @@ class RemoteTableSpec extends Specification with CatsEffect {
 
       TestControl.executeEmbed(test)
     }
+
+  def e11 = mismatchFailsCommit(Some(Config.PartitionColumn.EventName), Set("a"), Set("b"))
+
+  def e13 = mismatchFailsCommit(None, Set.empty, Set("load_tstamp_date", "event_name"))
+
+  private def mismatchFailsCommit(
+    column: Option[Config.PartitionColumn],
+    expected: Set[String],
+    actual: Set[String]
+  ) = {
+    val mismatch = new tables.Writer.PartitioningMismatchException(column, expected, actual)
+    control(partitioningCheck = Some(mismatch)).flatMap { c =>
+      val test = for {
+        remoteTable <- c.build(_ => "this is a setup error")
+        result <- remoteTable.commit("window1").attempt
+        state <- c.state.get
+      } yield (result, state) must beEqualTo((Left(mismatch), Vector(Action.PartitioningChecked)))
+
+      TestControl.executeEmbed(test)
+    }
+  }
+
+  def e12 =
+    control(partitioningCheck = Some(new RuntimeException("boom reading the partitioning"))).flatMap { c =>
+      val test = for {
+        remoteTable <- c.build(_ => "this is a setup error")
+        result <- remoteTable.commit("window1").attempt
+        state <- c.state.get
+      } yield (result, checksAndCommitAttempts(state)) must beEqualTo(
+        (Right(()), Vector(Action.PartitioningChecked, Action.CommitAttempted("window1", isRetry = false)))
+      )
+
+      TestControl.executeEmbed(test)
+    }
 }
 
 object RemoteTableSpec {
@@ -280,6 +322,7 @@ object RemoteTableSpec {
   object Action {
     case object CreateTableAttempted extends Action
     case class CommitAttempted(viewName: String, isRetry: Boolean) extends Action
+    case object PartitioningChecked extends Action
     case class SentAlert(timeSentSeconds: Long) extends Action
     case class BecameUnhealthy(service: RuntimeService) extends Action
     case class BecameHealthy(service: RuntimeService) extends Action
@@ -311,7 +354,8 @@ object RemoteTableSpec {
   /** Completes `failed` when a commit's first attempt raises */
   def signalFirstFailure(underlying: RemoteTable.Attempts[IO], failed: Deferred[IO, Unit]): RemoteTable.Attempts[IO] =
     new RemoteTable.Attempts[IO] {
-      def create: IO[Unit] = underlying.create
+      def create: IO[Unit]            = underlying.create
+      def checkPartitioning: IO[Unit] = underlying.checkPartitioning
       def attemptCommit(viewName: String, isRetry: Boolean): IO[Unit] =
         underlying.attemptCommit(viewName, isRetry).onError { case _ if !isRetry => failed.complete(()).void }
       def getTableDataFilesTotal: IO[Option[Long]]    = underlying.getTableDataFilesTotal
@@ -321,10 +365,24 @@ object RemoteTableSpec {
   def commitAttempts(state: Vector[Action]): Vector[Action] =
     state.collect { case a: Action.CommitAttempted => a }
 
-  def control(mocks: Mocks = Mocks(Nil), metricsFail: Boolean = false): IO[Control] =
+  def checksAndCommitAttempts(state: Vector[Action]): Vector[Action] =
+    state.collect {
+      case a: Action.CommitAttempted  => a
+      case Action.PartitioningChecked => Action.PartitioningChecked
+    }
+
+  /**
+   * @param partitioningCheck
+   *   What `checkPartitioning` raises, if anything.
+   */
+  def control(
+    mocks: Mocks                         = Mocks(Nil),
+    metricsFail: Boolean                 = false,
+    partitioningCheck: Option[Throwable] = None
+  ): IO[Control] =
     for {
       state <- Ref[IO].of(Vector.empty[Action])
-      attempts <- testAttempts(state, mocks.results, metricsFail)
+      attempts <- testAttempts(state, mocks.results, metricsFail, partitioningCheck)
     } yield Control(state, attempts, testAppHealth(state))
 
   private def testAppHealth(state: Ref[IO, Vector[Action]]): AppHealth.Interface[IO, Alert, RuntimeService] =
@@ -347,7 +405,8 @@ object RemoteTableSpec {
   private def testAttempts(
     state: Ref[IO, Vector[Action]],
     mocks: List[Response],
-    metricsFail: Boolean
+    metricsFail: Boolean,
+    partitioningCheck: Option[Throwable]
   ): IO[RemoteTable.Attempts[IO]] =
     for {
       mocksRef <- Ref[IO].of(mocks)
@@ -372,6 +431,9 @@ object RemoteTableSpec {
 
       def create: IO[Unit] =
         respond(Action.CreateTableAttempted)
+
+      def checkPartitioning: IO[Unit] =
+        state.update(_ :+ Action.PartitioningChecked) *> partitioningCheck.fold(IO.unit)(IO.raiseError)
 
       def attemptCommit(viewName: String, isRetry: Boolean): IO[Unit] =
         respond(Action.CommitAttempted(viewName, isRetry))

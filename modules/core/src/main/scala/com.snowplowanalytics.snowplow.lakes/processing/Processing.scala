@@ -33,7 +33,7 @@ import com.snowplowanalytics.snowplow.badrows.{BadRow, Processor => BadRowProces
 import com.snowplowanalytics.snowplow.badrows.Payload.{RawPayload => BadRowRawPayload}
 import com.snowplowanalytics.snowplow.streams.{EventProcessingConfig, ListOfList}
 import com.snowplowanalytics.snowplow.streams.compression.Decompression._
-import com.snowplowanalytics.snowplow.lakes.{Environment, RuntimeService}
+import com.snowplowanalytics.snowplow.lakes.{Config, Environment, RuntimeService}
 import com.snowplowanalytics.snowplow.runtime.processing.BatchUp
 import com.snowplowanalytics.snowplow.runtime.syntax.foldable._
 import com.snowplowanalytics.snowplow.loaders.transform.{BadRowsSerializer, NonAtomicFields, SchemaSubVersion, TabledEntity, Transform}
@@ -204,12 +204,13 @@ object Processing {
         _ <- possiblyExitOnMissingIgluSchema(env, nonAtomicFields)
         (bad, rows) <- transformToSpark[F](badProcessor, events, nonAtomicFields)
         _ <- sendFailedEvents(env, badProcessor, bad)
-        batchEventNameCounts <- Sync[F].delay(countEventNames(events))
+        batchPartitionCounts <-
+          Sync[F].delay(env.lakeWriter.partitionColumn.fold(Map.empty[Option[String], Int])(countPartitionValues(_, events)))
         windowState <- ref.updateAndGet { s =>
                          val updatedCollectorTstamp = chooseEarliestTstamp(earliestCollectorTstamp, s.earliestCollectorTstamp)
                          s.copy(
                            numEvents               = s.numEvents + rows.size,
-                           eventNameCounts         = s.eventNameCounts |+| batchEventNameCounts,
+                           partitionCounts         = s.partitionCounts |+| batchPartitionCounts,
                            earliestCollectorTstamp = updatedCollectorTstamp,
                            notStored               = s.notStored ++ resolved.notStored,
                            nonAtomicColumnNames =
@@ -264,20 +265,26 @@ object Processing {
     }
 
   /**
-   * The event-name histogram for one batch, which the window accumulates and the writer uses to
-   * balance the commit across partitions. See `WriterPartitioner`.
+   * The histogram of the partition column for one batch, which the window accumulates and the
+   * writer uses to balance the commit across partitions. See `WriterPartitioner`.
    *
    * Counted from the parsed events rather than from the transformed rows, because the transform
    * discards the association between a row and its event. That over-counts by the number of events
    * which failed to transform, which is immaterial to load balancing.
    *
-   * A missing `event_name` is counted under `None`, because it is a value in the column and
+   * A missing value is counted under `None`, because null is a value in the column and
    * `WriterPartitioner` sizes and splits it like any other key.
    */
-  private def countEventNames(events: ListOfList[Event]): Map[Option[String], Int] =
-    Foldable[ListOfList].foldLeft(events, Map.empty[Option[String], Int]) { case (acc, event) =>
-      acc.updated(event.event_name, acc.getOrElse(event.event_name, 0) + 1)
+  private def countPartitionValues(column: Config.PartitionColumn, events: ListOfList[Event]): Map[Option[String], Int] = {
+    val key: Event => Option[String] = column match {
+      case Config.PartitionColumn.EventName => _.event_name
+      case Config.PartitionColumn.AppId     => _.app_id
     }
+    Foldable[ListOfList].foldLeft(events, Map.empty[Option[String], Int]) { case (acc, event) =>
+      val k = key(event)
+      acc.updated(k, acc.getOrElse(k, 0) + 1)
+    }
+  }
 
   private def rememberTokens[F[_]: Applicative](
     ref: Ref[F, WindowState]
@@ -356,7 +363,7 @@ object Processing {
       val serialized = bad.map(badRow => BadRowsSerializer.withMaxSize(badRow, badProcessor, env.badRowMaxSize))
       env.metrics.addBad(bad.size.toLong) *>
         env.badSink
-          .sinkSimple(ListOfList.of(List(serialized)))
+          .sinkSimple(serialized)
           .onError { case _ =>
             env.appHealth.beUnhealthyForRuntimeService(RuntimeService.BadSink)
           }
@@ -371,7 +378,7 @@ object Processing {
         for {
           _ <- Logger[F].info(s"Window ${state.viewName} ready to write and commit ${state.numEvents} events to the lake.")
           _ <- Logger[F].info(s"Non atomic columns: [${state.nonAtomicColumnNames.toSeq.sorted.mkString(",")}]")
-          _ <- env.lakeWriter.prepareCommit(state.viewName, state.eventNameCounts, state.nonAtomicColumnNames)
+          _ <- env.lakeWriter.prepareCommit(state.viewName, state.numEvents, state.partitionCounts, state.nonAtomicColumnNames)
           _ <- env.lakeWriter.commit(state.viewName)
           now <- Sync[F].realTime
           _ <- Logger[F].info(s"Window ${state.viewName} finished writing and committing ${state.numEvents} events to the lake.")

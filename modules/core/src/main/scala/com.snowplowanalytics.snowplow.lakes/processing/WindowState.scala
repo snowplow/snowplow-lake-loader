@@ -33,13 +33,15 @@ import com.snowplowanalytics.snowplow.loaders.transform.TabledEntity
  *   Names of the columns which will be written out by the loader
  * @param numEvents
  *   The number of events in this window
- * @param eventNameCounts
- *   How many events of each `event_name` this window has seen, keyed by the column's value, so
- *   `None` counts the events that have none. Spreads the commit evenly over the writer's
- *   partitions; see `WriterPartitioner`. Events that fail to transform are counted anyway, so this
- *   is an approximation. Scattered failures cost nothing, but a whole `event_name` failing - one
- *   schema that stops resolving - reserves partitions for rows that never arrive, and the commit
- *   loses that share of its parallelism with every gauge reading healthy.
+ * @param partitionCounts
+ *   How many events of each `event_name` this window has seen, or of each `app_id` when that is the
+ *   partition column, keyed by the column's value, so `None` counts the events that have none.
+ *   Spreads the commit evenly over the writer's partitions; see `WriterPartitioner`. Events that
+ *   fail to transform are counted anyway, so this is an approximation. Scattered failures cost
+ *   nothing, but with `event_name` partitioning a whole `event_name` failing - one schema that
+ *   stops resolving - reserves partitions for rows that never arrive, and the commit loses that
+ *   share of its parallelism with every gauge reading healthy. Empty for an unpartitioned table,
+ *   whose commit spreads rows by a hash of `event_id` and needs no histogram.
  * @param earliestCollectorTstamp
  *   The earliest collector_tstamp of all events seen in the window
  * @param notStored
@@ -53,7 +55,7 @@ private[processing] case class WindowState(
   startTime: Instant,
   nonAtomicColumnNames: Set[String],
   numEvents: Int,
-  eventNameCounts: Map[Option[String], Int],
+  partitionCounts: Map[Option[String], Int],
   earliestCollectorTstamp: Option[Instant],
   notStored: Set[TabledEntity],
   id: Int

@@ -133,7 +133,16 @@ object SchemaStabilitySpec {
       columns = perBatch.flatMap(_._2).toSet
       prepared <- counting(
                     for {
-                      df <- SparkUtils.prepareFinalDataFrame[IO](spark, viewName, columns, writerParallelism = 2, partitioning, eventCounts)
+                      df <- SparkUtils.prepareFinalDataFrame[IO](
+                              spark,
+                              viewName,
+                              columns,
+                              writerParallelism = 2,
+                              partitioning,
+                              Some(Config.PartitionColumn.EventName),
+                              eventCounts.values.sum,
+                              eventCounts
+                            )
                       shuffled <- SparkUtils.materializeShuffle[IO](spark, df)
                     } yield shuffled
                   )

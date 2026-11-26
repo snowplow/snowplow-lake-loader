@@ -16,6 +16,7 @@ import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.iceberg.{HasTableOperations, Snapshot, Table}
+import org.apache.iceberg.transforms.Transforms
 import org.apache.iceberg.spark.Spark3Util
 import org.apache.iceberg.exceptions.CommitFailedException
 import org.apache.iceberg.io.{FileIO, SupportsStorageCredentials}
@@ -53,17 +54,55 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
           CREATE TABLE IF NOT EXISTS $fqTable
           (${SparkSchema.ddlForCreate})
           USING ICEBERG
-          PARTITIONED BY (date(load_tstamp), event_name)
+          PARTITIONED BY (date(load_tstamp), ${config.partitionColumn.name})
           TBLPROPERTIES($tableProps)
           $locationClause
         """)
       }.void *>
       checkVendedCredentials[F](spark) *>
+      // Before the empty commit, so that a table with the wrong partitioning is never written to,
+      // however many times a setup error retries this
+      readPartitioning[F](spark, latest = true).flatMap(Writer.checkPartitioning[F](this, _)) *>
       // We make an empty commit during startup, so the loader can fail early if we are missing any
       // permissions. It is tagged like a window, so that this process has a snapshot of its own
       // before its first window, for a retry's lookup to stop at. Nothing ever looks it up: a retried
       // `prepareTable` just makes the empty commit again.
       append[F](spark.createDataFrame(List.empty[Row].asJava, SparkSchema.structForCreate), Writer.WindowId.startup(processId))
+
+  override def tablePartitionColumn: Option[Config.PartitionColumn] = Some(config.partitionColumn)
+
+  override def expectedPartitioning: Set[String] =
+    Set(
+      IcebergWriter.describeField(Transforms.day[Any]().toString, "load_tstamp"),
+      IcebergWriter.describeField(Transforms.identity[Any]().toString, config.partitionColumn.name)
+    )
+
+  /**
+   * By source column and transform, never by the partition field's name, which need not name either
+   * \- see `partitionSpec`.
+   *
+   * Void fields are left out. A format-1 table cannot drop a partition field, so removing one turns
+   * it into a void transform, which puts every row in the same partition and so does not change
+   * which rows share a file.
+   *
+   * `latest` refreshes the table `CachingCatalog` holds, which reads the current metadata through
+   * the catalog and submits no Spark job. That is the `Table` an append commits through, and
+   * Iceberg does not synchronise a refresh with a commit in flight on it, so `latest` must not be
+   * read while this process could be committing.
+   *
+   * Otherwise the read is of that table as it stands. That is as this process's last commit left
+   * it, because `SnapshotProducer.commit` refreshes the table's operations once a commit succeeds,
+   * unless `CachingCatalog`'s entry has expired, in which case the load is a fresh one.
+   */
+  override def readPartitioning[F[_]: Sync](spark: SparkSession, latest: Boolean): F[Set[String]] =
+    Sync[F].blocking {
+      val table = Spark3Util.loadIcebergTable(spark, fqTable)
+      if (latest) table.refresh()
+      table.spec.fields.asScala
+        .filterNot(_.transform.isVoid)
+        .map(field => IcebergWriter.describeField(field.transform.toString, table.spec.schema.findColumnName(field.sourceId)))
+        .toSet
+    }
 
   /**
    * A retry writes only when the window is not already in the table, because the attempt that
@@ -307,6 +346,9 @@ class IcebergWriter(config: Config.Iceberg) extends Writer {
 }
 
 object IcebergWriter {
+
+  private def describeField(transform: String, sourceColumn: String): String =
+    s"$transform($sourceColumn)"
 
   /** The snapshot summary property carrying `Writer.WindowId.render` */
   val windowIdProperty: String = "snowplow.lake-loader.window-id"

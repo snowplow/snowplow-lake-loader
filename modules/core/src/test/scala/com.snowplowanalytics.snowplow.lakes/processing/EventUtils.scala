@@ -88,6 +88,13 @@ object EventUtils {
       }
     )
 
+  /**
+   * A batch whose events all carry the given `app_id`, and all share one `event_name`, so a
+   * histogram keyed by the wrong column is told apart from one keyed by `app_id`.
+   */
+  def withAppId(appId: String): IO[TestBatch] =
+    named("page_view").map(batch => TestBatch(batch.value.map(_.copy(app_id = Some(appId)))))
+
   def badlyFormatted: IO[TokenedEvents] =
     IO.unique.map { token =>
       val serialized = Chunk("nonsense1", "nonsense2").map(s => ByteBuffer.wrap(s.getBytes(StandardCharsets.UTF_8)))

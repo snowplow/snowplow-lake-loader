@@ -1,3 +1,19 @@
+Version 0.16.0 (2026-11-20)
+---------------------------
+Allow unpartitioned, liquid-clustered Delta tables (#131)
+Persist checkout credentials so Claude mentions can fetch (#118)
+Move Docker publishing to the shared two-stage pipeline, publishing -private images, and gate final releases (#101)
+Bump common-streams to 0.29.0 (#130)
+Bump common-streams to 0.29.0-M1 (#129)
+Bump Jackson to 2.22.4 and pin jackson-dataformat-cbor and compress-lzf (#125)
+Derive the Snowflake key-pair account from the catalog uri (#126)
+Restructure Dependencies.scala around a single securityOverrides Seq (#127)
+Tag Docker images as latest only for final releases (#124)
+Make the table's partition column configurable (#123)
+Test that a failing bad sink marks the app unhealthy (#121)
+Test the example configs with a ConfigSpec per cloud module (#120)
+Triage Snowflake Horizon REST catalog setup errors (#119)
+
 Version 0.15.0 (2026-10-29)
 ---------------------------
 Alert "Wrong storage name" again for an ABFS account that does not resolve (#115)

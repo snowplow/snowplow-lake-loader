@@ -1,4 +1,8 @@
 {
+  "license": {
+    "accept": true
+  }
+
   "input": {
     "topicName": "sp-enriched"
     "bootstrapServers": "NAMESPACENAME.servicebus.windows.net:9093"

@@ -20,8 +20,8 @@ import com.snowplowanalytics.iglu.core.{SchemaKey, SchemaVer, SelfDescribingData
 import com.snowplowanalytics.snowplow.analytics.scalasdk.SnowplowEvent
 import com.snowplowanalytics.snowplow.loaders.transform.NonAtomicFields
 import com.snowplowanalytics.snowplow.streams.compression.DecompressionConfig
-import com.snowplowanalytics.snowplow.lakes.{MockEnvironment, RuntimeService}
-import com.snowplowanalytics.snowplow.lakes.MockEnvironment.Action
+import com.snowplowanalytics.snowplow.lakes.{Config, MockEnvironment, RuntimeService}
+import com.snowplowanalytics.snowplow.lakes.MockEnvironment.{Action, Mocks, Response}
 
 class ProcessingSpec extends Specification with CatsEffect {
 
@@ -49,6 +49,9 @@ class ProcessingSpec extends Specification with CatsEffect {
     Crash and exit for clashing schemas seen in different windows $e20
     Hand the commit only the columns the window's own events used $e21
     Report the number of entries in the entity superset $e22
+    Mark app as unhealthy when sinking bad rows fails $e23
+    Key the histogram by app_id when that is the partition column, counting a missing app_id under None $e24
+    Count no histogram when the Delta table is configured with no partitioning $e25
   """
 
   def e1 = {
@@ -701,6 +704,42 @@ class ProcessingSpec extends Specification with CatsEffect {
     TestControl.executeEmbed(io)
   }
 
+  /**
+   * As `e18`, with `app_id` configured. Every named event shares one `event_name`, and `good()`'s
+   * events have no `app_id`, so they are counted under `None` exactly as a null `event_name` is.
+   */
+  def e24 = {
+    val io = for {
+      siteA1 <- EventUtils.withAppId("site_a")
+      siteA2 <- EventUtils.withAppId("site_a")
+      siteB <- EventUtils.withAppId("site_b")
+      noAppId <- EventUtils.good()
+      window <- List(siteA1, siteA2, siteB, noAppId).traverse(_.tokened)
+      control <- MockEnvironment.build(List(window), partitionColumn = Some(Config.PartitionColumn.AppId))
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+      expected = Map(Some("site_a") -> 4, Some("site_b") -> 2, None -> 2)
+    } yield state must contain(Action.PreparedCommit("v0000000001", expected))
+
+    TestControl.executeEmbed(io)
+  }
+
+  /** As `e24`'s events, with no partition column: no histogram is counted for the window. */
+  def e25 = {
+    val io = for {
+      siteA <- EventUtils.withAppId("site_a")
+      siteB <- EventUtils.withAppId("site_b")
+      noAppId <- EventUtils.good()
+      window <- List(siteA, siteB, noAppId).traverse(_.tokened)
+      control <- MockEnvironment.build(List(window), partitionColumn = None)
+      _ <- Processing.stream(control.environment).compile.drain
+      state <- control.state.get
+    } yield (state must contain(Action.PreparedCommit("v0000000001", Map.empty))) and
+      (state must contain(Action.AddedCommittedCountMetric(6)))
+
+    TestControl.executeEmbed(io)
+  }
+
   /** An event with the given unstructured event, versioned within `myvendor/goodschema` 7-*-* */
   private def goodSchemaUe(addition: Int): SnowplowEvent.UnstructEvent =
     SnowplowEvent.UnstructEvent(
@@ -804,6 +843,35 @@ class ProcessingSpec extends Specification with CatsEffect {
       _ <- Processing.stream(control.environment).compile.drain
       readings <- control.supersetEntries.get
     } yield readings must beEqualTo(Vector(1L, 2L))
+
+    TestControl.executeEmbed(io)
+  }
+
+  def e23 = {
+    val mocks = Mocks.default.copy(
+      badSinkResponse = Response.ExceptionThrown(new RuntimeException("Some error when sinking bad data"))
+    )
+
+    val io = for {
+      tokened <- EventUtils.badlyFormatted.map(List(_))
+      control <- MockEnvironment.build(List(tokened), mocks = mocks)
+      _ <- Processing.stream(control.environment).compile.drain.voidError
+      state <- control.state.get
+    } yield state should beEqualTo(
+      Vector(
+        Action.SubscribedToStream,
+        Action.CreatedTable,
+        Action.InitializedLocalDataFrame("v0000000001"),
+        Action.AddedReceivedCountMetric(2),
+        Action.AddedBadCountMetric(2),
+        Action.BecameUnhealthy(RuntimeService.BadSink),
+        Action.SetStorageMemoryBytes(1011L),
+        Action.SetStorageDiskBytes(1213L),
+        Action.SetShuffleDiskBytes(789L),
+        Action.SetDiskBytes(1415L),
+        Action.RemovedDataFrameFromDisk("v0000000001")
+      )
+    )
 
     TestControl.executeEmbed(io)
   }

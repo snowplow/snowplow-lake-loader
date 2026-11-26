@@ -16,17 +16,19 @@ import org.apache.iceberg.rest.auth.{AuthManager, AuthSession, DefaultAuthSessio
 import org.apache.iceberg.rest.{HTTPHeaders, HTTPRequest, RESTClient}
 import org.slf4j.LoggerFactory
 
+import java.net.URI
 import java.security.spec.{PKCS8EncodedKeySpec, RSAPublicKeySpec}
 import java.security.interfaces.RSAPrivateCrtKey
 import java.security.{KeyFactory, MessageDigest, Signature}
 import java.time.Instant
-import java.util.{Base64, Collections, Map => JMap}
+import java.util.{Base64, Collections, Locale, Map => JMap}
 
 import javax.crypto.{Cipher, EncryptedPrivateKeyInfo, SecretKeyFactory}
 import javax.crypto.spec.PBEKeySpec
 
 import scala.concurrent.duration.{DurationInt, FiniteDuration}
 import scala.jdk.CollectionConverters._
+import scala.util.Try
 
 /**
  * Authenticates to Snowflake's Horizon Iceberg REST catalog with a key pair.
@@ -36,7 +38,6 @@ import scala.jdk.CollectionConverters._
  * {{{
  * "options": {
  *   "rest.auth.type": "com.snowplowanalytics.snowplow.lakes.SnowflakeKeyPairAuthManager"
- *   "snowflake.auth.account": "MYORG-MYACCT"
  *   "snowflake.auth.user": "LAKE_LOADER_SVC"
  *   "snowflake.auth.private-key": "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----"
  *   "scope": "session:role:LAKE_LOADER_ROLE"
@@ -51,6 +52,9 @@ import scala.jdk.CollectionConverters._
  * That is why this cannot be Iceberg's own `OAuth2Manager`: it performs the first exchange
  * correctly, but refreshes by re-sending the credential it was given, which for key-pair auth is a
  * JWT that has since expired. This manager mints a fresh JWT for every exchange instead.
+ *
+ * The JWT names the Snowflake account, which is derived from the catalog `uri` unless
+ * `snowflake.auth.account` is set: see [[SnowflakeKeyPairAuthManager.Config.from]].
  */
 class SnowflakeKeyPairAuthManager(name: String) extends AuthManager {
 
@@ -74,6 +78,7 @@ object SnowflakeKeyPairAuthManager {
   final val PrivateKey               = "snowflake.auth.private-key"
   final val Passphrase               = "snowflake.auth.private-key-passphrase"
   private final val Uri              = "uri"
+  private final val SnowflakeDomain  = ".snowflakecomputing.com"
   private val JwtTtl: FiniteDuration = 59.minutes // Snowflake rejects a JWT that lives longer than an hour
 
   /**
@@ -86,8 +91,9 @@ object SnowflakeKeyPairAuthManager {
    * Raised for unusable configuration. Each failure has its own type so it can be told apart from
    * the others.
    *
-   * Only a key that cannot be used (`UnparseablePrivateKeyError`, `NonRsaPrivateKeyError`) is
-   * reported as a destination setup error, because the key and its passphrase come from the
+   * A key that cannot be used (`UnparseablePrivateKeyError`, `NonRsaPrivateKeyError`) and an
+   * account that cannot be derived from the catalog `uri` (`UnderivableAccountError`) are reported
+   * as destination setup errors, because the key, its passphrase and the catalog URL come from the
    * customer. The other options are written into the config by Snowplow, so a failure there is ours
    * to fix rather than something to alert the customer about.
    */
@@ -102,6 +108,11 @@ object SnowflakeKeyPairAuthManager {
   /** The key parses, but it is not an RSA key */
   final class NonRsaPrivateKeyError(message: String) extends ConfigError(message, null)
 
+  /**
+   * `snowflake.auth.account` is unset, and the catalog `uri` is not a `snowflakecomputing.com` URL
+   */
+  final class UnderivableAccountError(message: String) extends ConfigError(message, null)
+
   final case class Config(
     account: String,
     user: String,
@@ -113,33 +124,79 @@ object SnowflakeKeyPairAuthManager {
   object Config {
 
     /**
-     * The account is used as given, upper-cased. Snowflake expects either `<ORG>-<ACCOUNT>`, or an
-     * account locator without its region (`XY12345`, not `XY12345.US-EAST-1`). The two cannot be
-     * told apart reliably, so the account is not rewritten: a wrong format shows up as a 401 from
-     * the token exchange.
+     * Snowflake expects the account as either `<ORG>-<ACCOUNT>`, or an account locator without its
+     * region (`XY12345`, not `XY12345.US-EAST-1`). The first DNS label of a
+     * `snowflakecomputing.com` host is in one of those forms, whether the URL is an org-account, a
+     * locator, a regional or a privatelink URL, so that label is the account. So
+     * `myorg-myacct.snowflakecomputing.com` and
+     * `xy12345.us-east-1.privatelink.snowflakecomputing.com` give `MYORG-MYACCT` and `XY12345`. The
+     * label is passed through as written, apart from upper-casing: an underscore is not turned into
+     * a hyphen or the other way round. Snowflake's docs do not say which of the two forms a JWT
+     * accepts.
+     *
+     * An explicit `snowflake.auth.account` is used as given, upper-cased, and is not checked: a
+     * wrong format shows up as a 401 from the token exchange. It is needed where the derivation
+     * gets the account wrong or cannot find one:
+     *   - a client-redirect connection URL, `<org>-<connection>.snowflakecomputing.com`, whose
+     *     first label names a connection rather than the account;
+     *   - a host outside `snowflakecomputing.com`.
      */
     def from(properties: Map[String, String]): Config = {
-      val account = required(properties, Account)
+      val account = optional(properties, Account).getOrElse(deriveAccount(properties))
       val user    = required(properties, User)
       val scope   = required(properties, OAuth2Properties.SCOPE)
       val key     = required(properties, PrivateKey)
 
       Config(
-        account         = account.toUpperCase,
-        user            = user.toUpperCase,
+        account         = account.toUpperCase(Locale.ROOT),
+        user            = user.toUpperCase(Locale.ROOT),
         privateKey      = parsePrivateKey(key, properties.get(Passphrase).map(_.toCharArray), s"`$PrivateKey`"),
         scope           = scope,
         oauth2ServerUri = properties.getOrElse(OAuth2Properties.OAUTH2_SERVER_URI, defaultTokenEndpoint(properties))
       )
     }
 
+    private def optional(properties: Map[String, String], key: String): Option[String] =
+      properties.get(key).map(_.trim).filter(_.nonEmpty)
+
     private def required(properties: Map[String, String], key: String): String =
-      properties.get(key).map(_.trim).filter(_.nonEmpty) match {
+      optional(properties, key) match {
         case Some(value) => value
         case None =>
           throw new MissingOptionError(
             s"Missing Iceberg catalog option `$key`, required by ${classOf[SnowflakeKeyPairAuthManager].getName}"
           )
+      }
+
+    private def deriveAccount(properties: Map[String, String]): String = {
+      val derived = for {
+        host <- hostOf(required(properties, Uri))
+        if host.toLowerCase(Locale.ROOT).endsWith(SnowflakeDomain)
+        label = host.takeWhile(_ != '.')
+        if label.nonEmpty
+      } yield label
+
+      derived match {
+        case Some(label) => label
+        case None =>
+          throw new UnderivableAccountError(
+            s"Cannot derive the Snowflake account from the catalog `$Uri`, which must be a URL on a `snowflakecomputing.com` host; otherwise set `$Account`"
+          )
+      }
+    }
+
+    /**
+     * `java.net.URI` leaves the host null for a name with an underscore, which is not a valid DNS
+     * hostname but is a valid Snowflake account URL. The host is then read from the authority.
+     *
+     * The trailing `.` of a fully qualified name is dropped, so the host can be matched by suffix.
+     */
+    private def hostOf(uri: String): Option[String] =
+      Try(new URI(uri)).toOption.flatMap { parsed =>
+        Option(parsed.getHost)
+          .orElse(Option(parsed.getRawAuthority).map(_.split('@').last.takeWhile(_ != ':')))
+          .map(_.stripSuffix("."))
+          .filter(_.nonEmpty)
       }
 
     private def defaultTokenEndpoint(properties: Map[String, String]): String =
@@ -313,7 +370,9 @@ object SnowflakeKeyPairAuthManager {
       token     = response.token()
       expiresAt = now.plusSeconds(expiresIn)
       renewAt   = now.plusSeconds(Math.max(expiresIn - RenewBeforeExpiry.toSeconds, 1L))
-      logger.info(s"Obtained a Snowflake catalog token for ${config.user} on catalog $catalogName, valid for $expiresIn seconds")
+      logger.info(
+        s"Obtained a Snowflake catalog token for ${config.account}.${config.user} on catalog $catalogName, valid for $expiresIn seconds"
+      )
     }
   }
 }

@@ -10,8 +10,11 @@
 
 package com.snowplowanalytics.snowplow.lakes.tables
 
+import cats.implicits._
 import cats.effect.Sync
 import org.apache.spark.sql.{DataFrame, SparkSession}
+
+import com.snowplowanalytics.snowplow.lakes.Config
 
 import java.util.UUID
 
@@ -27,24 +30,51 @@ trait Writer {
    * For some table formats that can mean creating the table, or registering it in an external
    * catalog.
    *
+   * Raises `Writer.PartitioningMismatchException` if the table's partitioning is not
+   * `expectedPartitioning`, before writing anything to the table.
+   *
    * @param processId
    *   Identifies this run of the loader.
    */
   def prepareTable[F[_]: Sync](spark: SparkSession, processId: UUID): F[Unit]
 
+  /** The column the table is partitioned by, alongside the date of `load_tstamp` */
+  def tablePartitionColumn: Option[Config.PartitionColumn]
+
+  /**
+   * The partitioning a table must have for this loader's config, in `readPartitioning`'s terms.
+   * Empty for an unpartitioned table.
+   */
+  def expectedPartitioning: Set[String]
+
+  /**
+   * The table's actual partitioning, one element per partition field, in terms that
+   * `expectedPartitioning` can be compared with. A set, because the order of the fields does not
+   * change which rows share a file.
+   *
+   * @param latest
+   *   Whether the read must see the table as it is now, even if that submits a Spark job. Otherwise
+   *   it reflects this process's most recent commit, or anything newer it happens to have loaded.
+   *   It then makes no catalog round trip of its own beyond loading the table, and normally submits
+   *   no Spark job, so a change another process made since then is not seen until this process
+   *   commits again.
+   */
+  def readPartitioning[F[_]: Sync](spark: SparkSession, latest: Boolean): F[Set[String]]
+
   /**
    * Write Snowplow events into the table.
    *
-   * Both formats sort each writer partition by the table's partition columns and keep one output
-   * file open at a time, reached differently: Iceberg from `fanout-enabled` being false in
-   * `icebergWriteOptions`, Delta from Spark's `FileFormatWriter`, whose concurrent-writer path
-   * needs `spark.sql.maxConcurrentOutputFileWriters`. The alternative in both is a writer that
-   * keeps a file open per partition value the task meets, and an open parquet writer holds its
-   * column dictionaries and buffers on the JVM heap, so heap residency would scale with the
-   * distinct partition values in a task rather than with anything the loader sizes. Those values
-   * reduce to the task's distinct `event_name`s: Spark's `ComputeCurrentTime` folds the
-   * `current_timestamp()` that `SparkUtils.readFinalDataFrame` assigns to `load_tstamp` into one
-   * literal for the whole write, so the date half of the partition spec is constant.
+   * For a partitioned table, both formats sort each writer partition by the table's partition
+   * columns and keep one output file open at a time, reached differently: Iceberg from
+   * `fanout-enabled` being false in `icebergWriteOptions`, Delta from Spark's `FileFormatWriter`,
+   * whose concurrent-writer path needs `spark.sql.maxConcurrentOutputFileWriters`. The alternative
+   * in both is a writer that keeps a file open per partition value the task meets, and an open
+   * parquet writer holds its column dictionaries and buffers on the JVM heap, so heap residency
+   * would scale with the distinct partition values in a task rather than with anything the loader
+   * sizes. Those values reduce to the task's distinct `event_name`s, or `app_id`s when that is the
+   * partition column: Spark's `ComputeCurrentTime` folds the `current_timestamp()` that
+   * `SparkUtils.readFinalDataFrame` assigns to `load_tstamp` into one literal for the whole write,
+   * so the date half of the partition spec is constant.
    *
    * The sort is a Tungsten sort, so it draws execution memory from the area a window is staged in
    * and spills to `spark.local.dir` rather than failing when the area is short. What it asks for is
@@ -57,6 +87,13 @@ trait Writer {
    * throws when a row arrives for a partition whose file it has already closed - so a Spark or
    * Iceberg upgrade that stopped applying the required ordering would fail commits outright.
    * `IcebergWriterSpec` pins that it is still applied.
+   *
+   * An unpartitioned Delta table gives Spark no required ordering to impose, so its commit does not
+   * sort at all: each writer task writes a single file, holding the rows that hashed to it by
+   * `event_id` (see `SparkUtils.prepareFinalDataFrame`) in shuffle order. This holds for a
+   * clustered table too, because Delta clusters only when the table is optimized, not on an append.
+   * The commit then draws no execution memory for a sort, and the rows within a file are not
+   * grouped by any column until the table is optimized, which is the trade accepted here.
    *
    * @param windowId
    *   Identifies the window being written; the same on every attempt at it.
@@ -87,6 +124,32 @@ trait Writer {
 }
 
 object Writer {
+
+  /**
+   * Raised when the table's partitioning is not the one the config asks for. Its message carries
+   * the expected and actual partitioning.
+   *
+   * @param column
+   *   The configured partition column, which `expected` is derived from
+   */
+  final class PartitioningMismatchException(
+    val column: Option[Config.PartitionColumn],
+    val expected: Set[String],
+    val actual: Set[String]
+  ) extends RuntimeException(
+        s"The table is partitioned by ${describePartitioning(actual)}, but the configured partitionColumn needs ${describeExpected(expected)}"
+      )
+
+  def checkPartitioning[F[_]: Sync](writer: Writer, actual: Set[String]): F[Unit] =
+    Sync[F].raiseUnless(actual === writer.expectedPartitioning)(
+      new PartitioningMismatchException(writer.tablePartitionColumn, writer.expectedPartitioning, actual)
+    )
+
+  private def describePartitioning(fields: Set[String]): String =
+    fields.toList.sorted.mkString("[", ", ", "]")
+
+  private def describeExpected(fields: Set[String]): String =
+    if (fields.isEmpty) "no partitioning" else describePartitioning(fields)
 
   /**
    * Identifies one window's commit, so that a retry can tell whether an earlier attempt landed.

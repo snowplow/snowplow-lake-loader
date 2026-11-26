@@ -72,4 +72,49 @@ object SnowplowSparkBlockProbe {
   /** Every shuffle the map output tracker currently holds, for diffing around a call. */
   def registeredShuffleIds: Set[Int] =
     SparkEnv.get.mapOutputTracker.asInstanceOf[MapOutputTrackerMaster].shuffleStatuses.keySet.toSet
+
+  /**
+   * Records the largest `peakExecutionMemory` of any task that writes records and ends from now
+   * until `stop`, and how many such tasks there were.
+   *
+   * A sort inside a write reaches no `QueryExecution`: `FileFormatWriter` wraps the plan in its own
+   * `SortExec` as it executes, so no plan a listener can read shows it. Its `UnsafeExternalSorter`
+   * does claim execution memory, which a write that only reads a shuffle and writes files does not,
+   * so this is what tells a sorted commit from an unsorted one.
+   *
+   * Only tasks whose `outputMetrics.recordsWritten` is non-zero count. A table write runs other
+   * jobs around the one that writes files - Delta replays its log after committing, for one - and
+   * those claim execution memory of their own, so counting every task makes the reading depend on
+   * which of them end while the probe is listening.
+   */
+  final class PeakTaskExecutionMemory private[SnowplowSparkBlockProbe] (spark: SparkSession) {
+    private val max        = new java.util.concurrent.atomic.AtomicLong(0L)
+    private val writeTasks = new java.util.concurrent.atomic.AtomicInteger(0)
+    private val listener = new org.apache.spark.scheduler.SparkListener {
+      override def onTaskEnd(taskEnd: org.apache.spark.scheduler.SparkListenerTaskEnd): Unit =
+        Option(taskEnd.taskMetrics).filter(_.outputMetrics.recordsWritten > 0).foreach { m =>
+          writeTasks.incrementAndGet()
+          max.accumulateAndGet(m.peakExecutionMemory, (a, b) => math.max(a, b))
+        }
+    }
+    spark.sparkContext.listenerBus.waitUntilEmpty()
+    spark.sparkContext.addSparkListener(listener)
+
+    /** Waits for the listener bus, which delivers task ends asynchronously. */
+    def peak: Long = {
+      spark.sparkContext.listenerBus.waitUntilEmpty()
+      max.get
+    }
+
+    /** How many tasks wrote records, so a reading of 0 can be told from a write that was missed. */
+    def tasksWritingRecords: Int = {
+      spark.sparkContext.listenerBus.waitUntilEmpty()
+      writeTasks.get
+    }
+
+    def stop(): Unit = spark.sparkContext.removeSparkListener(listener)
+  }
+
+  def trackPeakTaskExecutionMemory(spark: SparkSession): PeakTaskExecutionMemory =
+    new PeakTaskExecutionMemory(spark)
 }

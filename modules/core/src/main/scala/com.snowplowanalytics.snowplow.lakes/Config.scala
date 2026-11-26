@@ -10,6 +10,7 @@
 
 package com.snowplowanalytics.snowplow.lakes
 
+import cats.implicits._
 import io.circe.Decoder
 import io.circe.generic.extras.semiauto._
 import io.circe.generic.extras.Configuration
@@ -57,21 +58,69 @@ object Config {
 
   case class MaxRecordSize(maxRecordSize: Int)
 
-  sealed trait Target
+  sealed trait Target {
 
+    /** The column the table is partitioned by, alongside the date of `load_tstamp` */
+    def tablePartitionColumn: Option[PartitionColumn]
+  }
+
+  /**
+   * @param partitionColumn
+   *   `None`, from a HOCON `null`, for a table with no partitioning, which the loader creates
+   *   clustered by `load_tstamp`. `reference.conf` sets `event_name`, so leaving the key out does
+   *   not mean `None`.
+   */
   case class Delta(
     location: URI,
-    deltaTableProperties: Map[String, String]
-  ) extends Target
+    deltaTableProperties: Map[String, String],
+    partitionColumn: Option[PartitionColumn]
+  ) extends Target {
+    def tablePartitionColumn: Option[PartitionColumn] = partitionColumn
+  }
 
+  /**
+   * @param partitionColumn
+   *   The loader always partitions an Iceberg table, so there is no `null` here
+   */
   case class Iceberg(
     database: String,
     table: String,
     catalog: IcebergCatalog,
     location: Option[URI],
     icebergTableProperties: Map[String, String],
-    icebergWriteOptions: Map[String, String]
-  ) extends Target
+    icebergWriteOptions: Map[String, String],
+    partitionColumn: PartitionColumn
+  ) extends Target {
+    def tablePartitionColumn: Option[PartitionColumn] = Some(partitionColumn)
+  }
+
+  /**
+   * The column the table is partitioned by, alongside the date of `load_tstamp`.
+   *
+   * It decides the partition spec only when the loader creates the table. An existing table must
+   * already be partitioned this way, and stay so while the loader runs: the config is
+   * authoritative, and the loader fails rather than adopt the table's spec.
+   */
+  sealed trait PartitionColumn {
+    def name: String
+  }
+
+  object PartitionColumn {
+    case object EventName extends PartitionColumn {
+      val name = "event_name"
+    }
+
+    case object AppId extends PartitionColumn {
+      val name = "app_id"
+    }
+
+    val all: List[PartitionColumn] = List(EventName, AppId)
+
+    implicit val decoder: Decoder[PartitionColumn] =
+      Decoder.decodeString.emap { s =>
+        all.find(_.name === s).toRight(s"Unsupported partitionColumn $s. Must be one of: ${all.map(_.name).mkString(", ")}")
+      }
+  }
 
   sealed trait IcebergCatalog
 
@@ -103,6 +152,9 @@ object Config {
    * The partition count is always `writerParallelism` and is not configurable, because one Spark
    * task slot must be left free for the per-batch handover. See `processing.WriterPartitioner`.
    *
+   * Written in terms of event names; the same applies to app ids when `app_id` is the partition
+   * column.
+   *
    * @param splitsPerFairShare
    *   How finely to cut an event name, as a fraction of a fair share: the loader aims for pieces of
    *   `fairShare / splitsPerFairShare` events. Smaller pieces give the bin-packer finer-grained
@@ -123,6 +175,10 @@ object Config {
    * can spread unevenly over the partitions and no setting changes that. That is the trade the
    * floor exists to make: such a window is small enough to commit well inside its window whatever
    * the spread, and whole output files are worth more there than even writer threads.
+   *
+   * For an unpartitioned table only `minEventsPerSplit` applies: the window is spread by a hash of
+   * `event_id` over as many partitions as give each about `minEventsPerSplit` events, up to
+   * `writerParallelism`.
    */
   case class WriterPartitioning(
     splitsPerFairShare: Int,

@@ -15,7 +15,9 @@ import org.apache.iceberg.rest.ErrorHandlers
 import org.apache.iceberg.rest.responses.ErrorResponse
 import org.specs2.Specification
 
-import com.snowplowanalytics.snowplow.lakes.tables.IcebergWriter
+import java.util.function.Consumer
+
+import com.snowplowanalytics.snowplow.lakes.tables.{IcebergWriter, Writer}
 
 class TableFormatSetupErrorSpec extends Specification {
   def is = s2"""
@@ -26,14 +28,51 @@ class TableFormatSetupErrorSpec extends Specification {
     give a specific message when the catalog rejects a write for metadata size $e4
     classify a BigLake permission denial as a setup error via the shared REST-spec 403 message $e5
     give a specific message for a BigLake project-not-found error $e6
-    classify an unusable Snowflake private key as a setup error $e7
+    classify an unusable Snowflake private key or catalog URL as a setup error $e7
     not classify a missing Snowflake key-pair auth option as a setup error $e8
     classify a Databricks table-level permission denial as missing privileges $e9
     give a specific message when Databricks disables the REST catalog API for the loader's credentials $e10
-    not classify a 403 with an unrecognised message as a setup error $e11
+    give a generic message for a 403 with an unrecognised message $e11
     give a fixed message, without the namespace or request id, for a missing namespace $e12
     classify a table loaded without vended credentials as a setup error $e13
+    give the generic 403 message for Snowflake Horizon's "Authorization failed" $e14
+    keep the specific message for an S3 identity-policy denial relayed by the catalog $e15
+    give the OAuth message for Snowflake Horizon's unauthorized_client $e16
+
+  TableFormatSetupError.Table.check should:
+    give the partitioning message naming app_id when that is the configured column $t1
+    give the partitioning message naming event_name when that is the configured column $t2
+    give the unpartitioned message when the config is for no partitioning $t3
   """
+
+  def t1 = {
+    val e = new Writer.PartitioningMismatchException(
+      Some(Config.PartitionColumn.AppId),
+      Set("load_tstamp_date", "app_id"),
+      Set("load_tstamp_date", "event_name")
+    )
+    TableFormatSetupError.Table.check(e) must beSome(
+      "The table's partitioning does not match the loader's configuration. The loader is configured to load into a table partitioned by the date of load_tstamp and app_id"
+    )
+  }
+
+  def t2 = {
+    val e = new Writer.PartitioningMismatchException(
+      Some(Config.PartitionColumn.EventName),
+      Set("load_tstamp_date", "event_name"),
+      Set("load_tstamp_date", "app_id")
+    )
+    TableFormatSetupError.Table.check(e) must beSome(
+      "The table's partitioning does not match the loader's configuration. The loader is configured to load into a table partitioned by the date of load_tstamp and event_name"
+    )
+  }
+
+  def t3 = {
+    val e = new Writer.PartitioningMismatchException(None, Set.empty, Set("load_tstamp_date", "event_name"))
+    TableFormatSetupError.Table.check(e) must beSome(
+      "The table's partitioning does not match the loader's configuration. The loader is configured to load into a table that is not partitioned"
+    )
+  }
 
   def e1 = TableFormatSetupError.IcebergRest.check(restException(429, "")) must beNone
 
@@ -79,6 +118,9 @@ class TableFormatSetupErrorSpec extends Specification {
     )) and
       (TableFormatSetupError.IcebergRest.check(new SnowflakeKeyPairAuthManager.NonRsaPrivateKeyError("EC key")) must beSome(
         "Snowflake private key is not an RSA key"
+      )) and
+      (TableFormatSetupError.IcebergRest.check(new SnowflakeKeyPairAuthManager.UnderivableAccountError("no account")) must beSome(
+        "Snowflake account cannot be derived from the catalog URL. Check it is your account's snowflakecomputing.com URL"
       ))
 
   // Snowplow writes the other options, so a missing one is ours to fix, not the customer's
@@ -107,7 +149,7 @@ class TableFormatSetupErrorSpec extends Specification {
       ))
   }
 
-  def e11 = TableFormatSetupError.IcebergRest.check(restException(403, "Something we have never seen")) must beNone
+  def e11 = TableFormatSetupError.IcebergRest.check(restException(403, "Something we have never seen")) must beSome(forbiddenMessage)
 
   def e12 =
     TableFormatSetupError.IcebergRest.check(
@@ -119,12 +161,43 @@ class TableFormatSetupErrorSpec extends Specification {
       "REST catalog did not provide storage credentials for the table. Check that the catalog allows external engines to access the table's storage"
     )
 
+  // Horizon's 403 for a missing privilege on the schema, table or external volume
+  def e14 = TableFormatSetupError.IcebergRest.check(restException(403, "Authorization failed")) must beSome(forbiddenMessage)
+
+  def e15 =
+    TableFormatSetupError.IcebergRest.check(
+      restException(
+        403,
+        "User: arn:aws:sts::123456789012:assumed-role/catalog-role/snowflake is not authorized to perform: s3:GetObject on resource: \"arn:aws:s3:::bucket/DB/ATOMIC/events/metadata/00008.gz.metadata.json\" because no identity-based policy allows the s3:GetObject action (Service: S3, Status Code: 403, Request ID: X, Extended Request ID: Y) (SDK Attempt Count: 1)"
+      )
+    ) must beSome("IAM role of the REST catalog is missing permissions")
+
+  // Horizon answers the token exchange with unauthorized_client for every key, user, role or network
+  // policy mistake
+  def e16 =
+    TableFormatSetupError.IcebergRest.check(
+      restException(ErrorHandlers.oauthErrorHandler(), 400, "The client is not authorized", Some("unauthorized_client"))
+    ) must beSome(
+      "REST catalog rejected the loader's credentials (OAuth error: unauthorized_client). Check the credentials configured for the catalog, and the role or scope they request"
+    )
+
+  private val forbiddenMessage =
+    "REST catalog denied the loader access. Check the catalog's setup and the permissions granted to the loader"
+
   // Build the exception through Iceberg's own error handler rather than hand-writing the message, so
   // the test pins the real message format and fails if an Iceberg upgrade changes it. Returns the
   // mapped exception (RESTException, ForbiddenException, ...) for the classifier to inspect.
   private def restException(code: Int, message: String): Throwable =
+    restException(ErrorHandlers.defaultErrorHandler(), code, message, None)
+
+  private def restException(
+    handler: Consumer[ErrorResponse],
+    code: Int,
+    message: String,
+    errorType: Option[String]
+  ): Throwable =
     try {
-      ErrorHandlers.defaultErrorHandler().accept(ErrorResponse.builder().responseCode(code).withMessage(message).build())
+      handler.accept(ErrorResponse.builder().responseCode(code).withMessage(message).withType(errorType.orNull).build())
       throw new AssertionError(s"expected an exception for code $code")
     } catch {
       case e: RuntimeException => e

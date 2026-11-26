@@ -3,7 +3,7 @@
   # -- Accept the terms of the Snowplow Limited Use License Agreement
   # -- See https://docs.snowplow.io/limited-use-license-1.1/
   "license": {
-    "accept": ${?ACCEPT_LIMITED_USE_LICENSE}
+    "accept": true
   }
 
   "input": {
@@ -23,7 +23,7 @@
       "group.id": "snowplow-lake-loader"
       "security.protocol": "SASL_SSL"
       "sasl.mechanism": "PLAIN"
-      "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$ConnectionString\" password="<YOUR_PASSWORD>"
+      "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$ConnectionString\" password=\"<YOUR_PASSWORD>\""
     }
   }
 
@@ -38,9 +38,13 @@
       # -- Any valid Delta table property
       # -- This can be blank in most setups because the loader already sets sensible defaults.
       "deltaTableProperties": {
-        "delta.dataSkippingStatsColumns": "load_tstamp,collector_tstamp,derived_tstamp,dvce_created_tstamp"
         "delta.checkpointInterval": "50"
       }
+
+      # -- The column the table is partitioned by, alongside the date of load_tstamp: `event_name`, `app_id` or `null`. Optional, default `event_name`.
+      # -- `null` means no partitioning: the loader creates the table with liquid clustering on load_tstamp.
+      # -- It only takes effect when the loader creates the table; the loader stops if an existing table is partitioned differently.
+      "partitionColumn": "event_name"
 
     }
 
@@ -82,6 +86,8 @@
 #     "icebergWriteOptions": {
 #       "write-format": "parquet"
 #     }
+#
+#     "partitionColumn": "event_name"
 #   }
 
     "bad": {
@@ -97,7 +103,7 @@
         "client.id": "snowplow-lake-loader"
         "security.protocol": "SASL_SSL"
         "sasl.mechanism": "PLAIN"
-        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$ConnectionString\" password="<YOUR_PASSWORD>"
+        "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$ConnectionString\" password=\"<YOUR_PASSWORD>\""
       }
     }
 
@@ -130,6 +136,7 @@
     # -- How the loader spreads a window's events over the spark partitions that write to the lake.
     # -- The aim is partitions of similar size, so no single task becomes the critical path of the
     # -- commit, without scattering an event_name so widely that the output files get fragmented.
+    # -- The same applies to app_ids when partitionColumn is `app_id`.
     # -- The number of partitions is not configurable: it is always one fewer than the number of
     # -- available processors, so that one spark task slot is always free for the loader to hand
     # -- each batch over to spark while a commit is in progress.
@@ -153,6 +160,9 @@
       # -- such event_names may spread unevenly over the writer threads. That is deliberate: a
       # -- window that small commits well within its window whatever the spread, and keeping the
       # -- output files whole is worth more there than balancing the threads.
+      # --
+      # -- For a Delta table with `partitionColumn: null`, only this setting applies: the window is
+      # -- spread evenly over as many writer threads as give each about this many events.
       "minEventsPerSplit": 5000
     }
 
@@ -160,7 +170,7 @@
     # -- This can be blank in most setups because the loader already sets sensible defaults.
     "conf": {
       # -- E.g. to enable the spark ui for debugging:
-      "spark.ui.enabled": true
+      "spark.ui.enabled": "true"
     }
   }
 

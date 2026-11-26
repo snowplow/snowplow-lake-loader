@@ -30,6 +30,12 @@ import com.snowplowanalytics.snowplow.lakes.tables.{DeltaWriter, IcebergWriter, 
 
 trait LakeWriter[F[_]] {
 
+  /**
+   * The column the table is partitioned by, which `prepareCommit`'s histogram must be keyed by.
+   * `None` for an unpartitioned table, whose histogram is empty.
+   */
+  def partitionColumn: Option[Config.PartitionColumn]
+
   def createTable: F[Unit]
 
   /**
@@ -85,16 +91,20 @@ trait LakeWriter[F[_]] {
    *
    * Must be called before `commit`, and only once the window has stopped accepting appends.
    *
-   * @param eventNameCounts
-   *   The window's event-name histogram, keyed by the column's value so that `None` is the events
-   *   with no `event_name`. Decides how the repartition spreads the window over the writer's
-   *   partitions. See `WriterPartitioner`.
+   * @param numEvents
+   *   The number of events in the window. Decides how many partitions an unpartitioned table's
+   *   window is spread over.
+   * @param partitionCounts
+   *   The window's histogram of the configured partition column, keyed by the column's value so
+   *   that `None` is the events where it is null. Decides how the repartition spreads the window
+   *   over the writer's partitions. See `WriterPartitioner`. Ignored for an unpartitioned table.
    * @param nonAtomicColumnNames
    *   The non-atomic columns written to the lake. The view can hold more.
    */
   def prepareCommit(
     viewName: String,
-    eventNameCounts: Map[Option[String], Int],
+    numEvents: Int,
+    partitionCounts: Map[Option[String], Int],
     nonAtomicColumnNames: Set[String]
   ): F[Unit]
 
@@ -108,6 +118,9 @@ trait LakeWriter[F[_]] {
    *
    * Retries until the write succeeds or the retries run out, and a retry first checks whether the
    * failed attempt landed after all - `RemoteTable` and `Writer.write` have the detail.
+   *
+   * First checks, once and without retrying, that the table is still partitioned as configured, and
+   * raises if it is not - `RemoteTable.commit` has the detail.
    */
   def commit(viewName: String): F[Unit]
 
@@ -167,17 +180,20 @@ trait LakeWriter[F[_]] {
    * memory one: together they give the split, and a pair read separately could come from two
    * different measurements.
    *
-   * That split is what sizing the area moves, and it is not a reading of whether the window fit.
-   * `spark.memory.storageFraction` is 0 and `Writer.write`'s sort draws a window's rows from the
-   * same area, so the previous window's sort - running while this one stages - empties it every
-   * window whatever it is sized at. The memory half is what was still resident at the point above
-   * and the disk half is the rest, so a large disk half is the normal condition rather than a
-   * symptom; what moves the ratio is how much area was left for this window to keep.
+   * For a partitioned table, that split is what sizing the area moves, and it is not a reading of
+   * whether the window fit. `spark.memory.storageFraction` is 0 and `Writer.write`'s sort draws a
+   * window's rows from the same area, so the previous window's sort, which runs while this one
+   * stages, empties it every window whatever it is sized at. The memory half is what was still
+   * resident at the point above and the disk half is the rest, so a large disk half is the normal
+   * condition rather than a symptom; what moves the ratio is how much area was left for this window
+   * to keep. An unpartitioned Delta table's commit does not sort, so nothing in it empties the
+   * area, and there a large disk half means the area is too small for a window.
    *
    * The peak of *block* occupancy, not of the memory area as a whole. The area also holds execution
-   * memory: the shuffle's, which peaks inside the call this measurement is taken after, and the
-   * write's sort, which is the larger claim and peaks later still. Nothing the loader samples
-   * itself can see either; Spark's own `ExecutorMetrics` peaks are the instrument for that.
+   * memory: the shuffle's, which peaks inside the call this measurement is taken after, and, for a
+   * partitioned table, the write's sort, which is the larger claim and peaks later still. Nothing
+   * the loader samples itself can see either; Spark's own `ExecutorMetrics` peaks are the
+   * instrument for that.
    */
   def getStorageUsage(viewName: String): F[Option[LakeWriter.BlockManagerUsage]]
 
@@ -273,6 +289,7 @@ object LakeWriter {
       remoteTable,
       writerParallelism,
       config.writerPartitioning,
+      target.tablePartitionColumn,
       shouldRestoreNullability,
       stageOffHeap,
       mutexForLocalAppending,
@@ -299,6 +316,9 @@ object LakeWriter {
   ): RemoteTable.Attempts[F] = new RemoteTable.Attempts[F] {
     def create: F[Unit] =
       w.prepareTable(spark, processId) *> logTableDescription
+
+    def checkPartitioning: F[Unit] =
+      w.readPartitioning(spark, latest = false).flatMap(Writer.checkPartitioning[F](w, _))
 
     /**
      * Swallows its errors, because `RemoteTable` would otherwise retry `create` and raise
@@ -384,11 +404,14 @@ object LakeWriter {
     remoteTable: RemoteTable[F],
     writerParallelism: Int,
     writerPartitioning: Config.WriterPartitioning,
+    column: Option[Config.PartitionColumn],
     shouldRestoreNullability: Boolean,
     stageOffHeap: Boolean,
     mutexForLocalAppending: Mutex[F],
     windowResources: Ref[F, Map[String, WindowResources]]
   ): LakeWriter[F] = new LakeWriter[F] {
+    val partitionColumn: Option[Config.PartitionColumn] = column
+
     def createTable: F[Unit] =
       remoteTable.create
 
@@ -428,12 +451,22 @@ object LakeWriter {
 
     def prepareCommit(
       viewName: String,
-      eventNameCounts: Map[Option[String], Int],
+      numEvents: Int,
+      partitionCounts: Map[Option[String], Int],
       nonAtomicColumnNames: Set[String]
     ): F[Unit] =
       for {
         df <-
-          SparkUtils.prepareFinalDataFrame(spark, viewName, nonAtomicColumnNames, writerParallelism, writerPartitioning, eventNameCounts)
+          SparkUtils.prepareFinalDataFrame(
+            spark,
+            viewName,
+            nonAtomicColumnNames,
+            writerParallelism,
+            writerPartitioning,
+            partitionColumn,
+            numEvents,
+            partitionCounts
+          )
         shuffled <- SparkUtils.materializeShuffle(spark, df)
         // Only when there is a shuffle, because only then does the release below happen here. With
         // no shuffle the batches live on and `recordBlockManagerPeak` measures them at the drop.

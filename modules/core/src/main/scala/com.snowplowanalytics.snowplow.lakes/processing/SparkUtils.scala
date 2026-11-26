@@ -321,24 +321,48 @@ private[processing] object SparkUtils {
     nonAtomicColumnNames: Set[String],
     writerParallelism: Int,
     writerPartitioning: Config.WriterPartitioning,
-    eventNameCounts: Map[Option[String], Int]
+    partitionColumn: Option[Config.PartitionColumn],
+    numEvents: Int,
+    partitionCounts: Map[Option[String], Int]
   ): F[DataFrame] =
     Sync[F]
       .delay(selectWindowColumns(spark.table(viewName), nonAtomicColumnNames))
-      .flatMap(repartitionForWriting(_, writerParallelism, writerPartitioning, eventNameCounts))
+      .flatMap(repartitionForWriting(_, writerParallelism, writerPartitioning, partitionColumn, numEvents, partitionCounts))
 
   private def selectWindowColumns(df: DataFrame, nonAtomicColumnNames: Set[String]): DataFrame =
     df.select((SparkSchema.atomic.map(_.name) ++ nonAtomicColumnNames.toVector.sorted).map(df.col): _*)
 
   /**
+   * How many partitions an unpartitioned table's window is spread over: one file each, so no more
+   * than give each about `minEventsPerSplit` events, and at least one. Floor division, the same as
+   * `WriterPartitioner`, because `minEventsPerSplit` is a floor on a partition's size.
+   */
+  private[processing] def unpartitionedNumPartitions(
+    numEvents: Int,
+    writerParallelism: Int,
+    writerPartitioning: Config.WriterPartitioning
+  ): Int = {
+    val perPartition = math.max(writerPartitioning.minEventsPerSplit, 1).toLong
+    val wanted       = numEvents.toLong / perPartition
+    math.min(math.max(wanted, 1L), writerParallelism.toLong).toInt
+  }
+
+  /**
    * Redistributes the accumulated window into the partitions that will be written to the lake.
    *
-   * The aim is partitions of similar size, so that no single task becomes the critical path of the
-   * commit, without scattering an `event_name` so widely that the output files become fragmented.
-   * `WriterPartitioner` decides where each key goes, from the histogram the window counted as its
-   * events arrived, so the commit reads the window once: nothing here inspects the data to work out
-   * where a row belongs. A partitioning that needs boundaries instead - `repartitionByRange` - has
-   * Spark sample every input partition in a job of its own first, reading the window twice.
+   * For an unpartitioned table, each writer task writes one file whatever it holds, so rows are
+   * spread evenly by a hash of `event_id` instead, over as many partitions as give each about
+   * `minEventsPerSplit` events, up to `writerParallelism`. This is not `repartition(n)`'s
+   * round-robin: with `spark.sql.execution.sortBeforeRepartition` on, that sorts every map
+   * partition, drawing on the memory area that holds the staged batches. The histogram is not read.
+   *
+   * For a partitioned table, the aim is partitions of similar size, so that no single task becomes
+   * the critical path of the commit, without scattering an `event_name` so widely that the output
+   * files become fragmented. `WriterPartitioner` decides where each key goes, from the histogram
+   * the window counted as its events arrived, so the commit reads the window once: nothing here
+   * inspects the data to work out where a row belongs. A partitioning that needs boundaries
+   * instead, such as `repartitionByRange`, has Spark sample every input partition in a job of its
+   * own first, reading the window twice.
    *
    * `repartitionById` is the only repartition that takes the partition id outright; `repartition(n,
    * cols)` is hardcoded to `pmod(murmur3(cols), n)` and cannot express a chosen assignment. It
@@ -349,28 +373,42 @@ private[processing] object SparkUtils {
     df: DataFrame,
     writerParallelism: Int,
     writerPartitioning: Config.WriterPartitioning,
-    eventNameCounts: Map[Option[String], Int]
+    partitionColumn: Option[Config.PartitionColumn],
+    numEvents: Int,
+    partitionCounts: Map[Option[String], Int]
   ): F[DataFrame] =
     if (writerParallelism <= 1)
       Sync[F].delay(df.coalesce(1))
     else
-      Sync[F].delay(WriterPartitioner.plan(eventNameCounts, writerParallelism, writerPartitioning)).flatMap { plan =>
-        Logger[F].debug(s"Writing window into ${plan.numPartitions} partitions. ${describePlan(plan)}") *>
-          Sync[F].delay(df.repartitionById(plan.numPartitions, partitionIdColumn(df, plan)))
+      partitionColumn match {
+        case None =>
+          val numPartitions = unpartitionedNumPartitions(numEvents, writerParallelism, writerPartitioning)
+          Logger[F].debug(s"Writing window into $numPartitions partitions, spread by a hash of event_id: the table is unpartitioned") *>
+            Sync[F].delay(df.repartitionById(numPartitions, pmod(hash(df.col("event_id")), lit(numPartitions))))
+        case Some(column) =>
+          Sync[F].delay(WriterPartitioner.plan(partitionCounts, writerParallelism, writerPartitioning)).flatMap { plan =>
+            Logger[F].debug(s"Writing window into ${plan.numPartitions} partitions. ${describePlan(column, plan)}") *>
+              Sync[F].delay(df.repartitionById(plan.numPartitions, partitionIdColumn(df, column, plan)))
+          }
       }
 
   /**
-   * A CASE over `event_name` giving each row the partition `WriterPartitioner` chose for its key.
+   * A CASE over `event_name`, or `app_id` when that is the partition column, giving each row the
+   * partition `WriterPartitioner` chose for its key.
    *
-   * The `None` key is the rows where `event_name` is null, so it is matched with `isNull`: an
+   * The `None` key is the rows where the column is null, so it is matched with `isNull`: an
    * equality against null never holds.
    *
    * Every id this can produce is below `plan.numPartitions`, which the exchange relies on: Spark
    * wraps the id in a `pmod` of its own, so a breach would not throw - it would quietly fold ids
    * back into range and unbalance the commit.
    */
-  private def partitionIdColumn(df: DataFrame, plan: WriterPartitioner.Plan): Column = {
-    val eventName = df.col("event_name")
+  private def partitionIdColumn(
+    df: DataFrame,
+    partitionColumn: Config.PartitionColumn,
+    plan: WriterPartitioner.Plan
+  ): Column = {
+    val keyColumn = df.col(partitionColumn.name)
     val eventId   = df.col("event_id")
 
     // The array of partitions for a split key is foldable, so Catalyst's ConstantFolding replaces
@@ -387,7 +425,7 @@ private[processing] object SparkUtils {
     // bearing rather than a tidiness. A window whose volume is spread evenly over many names pays
     // the most, because then no ordering makes the common case short.
     val branches = plan.assignments.foldLeft(Option.empty[Column]) { case (acc, (name, partitions)) =>
-      val matches = name.fold(eventName.isNull)(eventName === lit(_))
+      val matches = name.fold(keyColumn.isNull)(keyColumn === lit(_))
       val target  = partitionFor(partitions)
       Some(acc.fold(when(matches, target))(_.when(matches, target)))
     }
@@ -415,10 +453,10 @@ private[processing] object SparkUtils {
    * commit takes come first. Never empty: `Processing.finalizeWindow` only commits a window with
    * `numEvents > 0`, and every event contributes a key.
    */
-  private def describePlan(plan: WriterPartitioner.Plan): String = {
+  private def describePlan(partitionColumn: Config.PartitionColumn, plan: WriterPartitioner.Plan): String = {
     def render(name: Option[String]) = name.getOrElse("<null>")
     val pieces = plan.assignments.map { case (name, partitions) => s"${render(name)} x${partitions.length}" }
-    s"Partitions per event_name: ${pieces.mkString(", ")}. Expected events per partition: ${plan.partitionLoads.mkString(",")}"
+    s"Partitions per ${partitionColumn.name}: ${pieces.mkString(", ")}. Expected events per partition: ${plan.partitionLoads.mkString(",")}"
   }
 
   /**

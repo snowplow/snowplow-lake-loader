@@ -154,7 +154,9 @@ class IcebergWriterSpec extends Specification with CatsEffect {
                       nonAtomicColumnNames = Set.empty,
                       writerParallelism    = 2,
                       writerPartitioning   = config.spark.writerPartitioning,
-                      eventNameCounts      = cycled.groupBy(name => Option(name)).view.mapValues(_.size).toMap
+                      partitionColumn      = Some(Config.PartitionColumn.EventName),
+                      numEvents            = cycled.size,
+                      partitionCounts      = cycled.groupBy(name => Option(name)).view.mapValues(_.size).toMap
                     )
         shuffled <- SparkUtils.materializeShuffle[IO](spark, prepared)
         _ <- SparkUtils.replaceView[IO](viewName, shuffled.df)
@@ -397,7 +399,7 @@ class IcebergWriterSpec extends Specification with CatsEffect {
         _ <- IO(AmbiguousCommitCatalog.failNextWindowCommit(error))
         _ <- w.initializeLocalDataFrame(viewName)
         _ <- w.localAppendRows(viewName, rows, schema)
-        _ <- w.prepareCommit(viewName, counts, Set.empty)
+        _ <- w.prepareCommit(viewName, counts.values.sum, counts, Set.empty)
         _ <- w.commit(viewName)
         _ <- w.removeDataFrameFromDisk(viewName)
       } yield ()
